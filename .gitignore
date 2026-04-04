@@ -8,6 +8,10 @@ __pycache__/
 venv/
 .venv/
 
+# Project data and generated reports
+01 input files/
+02 reports/
+
 # Editor swap and temp files
 *.swp
 *.swo
