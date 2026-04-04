@@ -1,0 +1,20 @@
+.DS_Store
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+.venv/
+
+# Editor swap and temp files
+*.swp
+*.swo
+*~
+
+# Build and test artifacts
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
