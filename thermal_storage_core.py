@@ -8,6 +8,8 @@ from typing import Callable
 
 import numpy as np
 import pandas as pd
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 RHO_WATER = 1000.0  # kg/m3
 CP_WATER = 4182.0  # J/(kg*K)
@@ -26,6 +28,21 @@ TANK_TYPE_DEFAULTS = {
         "loss_percent_per_day": 0.15,
         "cost_coeff": 900.0,
         "cost_exponent": 0.82,
+    },
+}
+
+TANK_GEOMETRY_DEFAULTS = {
+    "short_term": {
+        "height_m": 2.4,
+        "static_mixing_coeff": 0.020,
+        "charge_mixing_coeff": 0.080,
+        "discharge_mixing_coeff": 0.060,
+    },
+    "seasonal": {
+        "height_m": 7.5,
+        "static_mixing_coeff": 0.010,
+        "charge_mixing_coeff": 0.045,
+        "discharge_mixing_coeff": 0.035,
     },
 }
 
@@ -113,6 +130,14 @@ def tank_cost_curve(
     if tank_type == "short_term":
         return short_term_cost_coeff, short_term_cost_exponent
     return seasonal_cost_coeff, seasonal_cost_exponent
+
+
+def tank_geometry_value(
+    tank_type: str,
+    short_term_value: float,
+    seasonal_value: float,
+) -> float:
+    return short_term_value if tank_type == "short_term" else seasonal_value
 
 
 def energy_per_m3_kwh(tank_min_temp: float, tank_max_temp: float) -> float:
@@ -309,6 +334,73 @@ def default_stratification_nodes(tank_type: str) -> int:
     return 8 if tank_type == "short_term" else 12
 
 
+def tank_diameter_from_volume_height(tank_volume_m3: float, tank_height_m: float) -> float:
+    if tank_volume_m3 <= 0 or tank_height_m <= 0:
+        raise ValueError("Tank volume and tank height must both be greater than zero.")
+    return float(np.sqrt(4.0 * tank_volume_m3 / (np.pi * tank_height_m)))
+
+
+def stratification_efficiency_from_geometry(tank_height_m: float, tank_diameter_m: float) -> float:
+    aspect_ratio = tank_height_m / max(tank_diameter_m, 1e-9)
+    aspect_factor = float(np.clip((aspect_ratio - 0.9) / 2.6, 0.0, 1.0))
+    height_factor = float(np.clip((tank_height_m - 1.5) / 5.0, 0.0, 1.0))
+    return float(np.clip(0.35 + 0.45 * aspect_factor + 0.15 * height_factor, 0.25, 0.95))
+
+
+def adjusted_mixing_coefficient(base_coeff: float, stratification_efficiency: float) -> float:
+    geometry_penalty = 1.25 - stratification_efficiency
+    return float(np.clip(base_coeff * geometry_penalty, 0.0, 0.45))
+
+
+def mix_tank_layers(layer_temps_c: np.ndarray, mixing_coeff: float) -> np.ndarray:
+    coeff = float(np.clip(mixing_coeff, 0.0, 0.45))
+    if coeff <= 0 or len(layer_temps_c) <= 1:
+        return stabilize_stratification(layer_temps_c.copy())
+
+    previous = layer_temps_c.copy()
+    updated = previous.copy()
+    updated[0] = previous[0] + coeff * (previous[1] - previous[0])
+    updated[-1] = previous[-1] + coeff * (previous[-2] - previous[-1])
+    if len(previous) > 2:
+        updated[1:-1] = previous[1:-1] + coeff * (
+            previous[:-2] - 2.0 * previous[1:-1] + previous[2:]
+        )
+    return stabilize_stratification(updated)
+
+
+def tank_geometry_metrics(
+    tank_volume_m3: float,
+    tank_height_m: float,
+    static_mixing_coeff: float,
+    charge_mixing_coeff: float,
+    discharge_mixing_coeff: float,
+) -> dict[str, float]:
+    tank_diameter_m = tank_diameter_from_volume_height(tank_volume_m3, tank_height_m)
+    height_to_diameter_ratio = tank_height_m / max(tank_diameter_m, 1e-9)
+    stratification_efficiency = stratification_efficiency_from_geometry(
+        tank_height_m=tank_height_m,
+        tank_diameter_m=tank_diameter_m,
+    )
+    return {
+        "tank_height_m": float(tank_height_m),
+        "tank_diameter_m": tank_diameter_m,
+        "tank_height_to_diameter_ratio": float(height_to_diameter_ratio),
+        "stratification_efficiency": stratification_efficiency,
+        "static_mixing_coeff_effective": adjusted_mixing_coefficient(
+            static_mixing_coeff,
+            stratification_efficiency,
+        ),
+        "charge_mixing_coeff_effective": adjusted_mixing_coefficient(
+            charge_mixing_coeff,
+            stratification_efficiency,
+        ),
+        "discharge_mixing_coeff_effective": adjusted_mixing_coefficient(
+            discharge_mixing_coeff,
+            stratification_efficiency,
+        ),
+    }
+
+
 def create_tank_layers(initial_temp: float, num_nodes: int) -> np.ndarray:
     return np.full(num_nodes, float(initial_temp), dtype=float)
 
@@ -444,14 +536,17 @@ def _simulate_single_pass(
     heating_supply_temp: float,
     heating_delta_t: float,
     solar_collector_delta_t: float,
+    direct_solar_delivery_margin_c: float,
     tank_thermal_loss_percent_per_day: float,
     auxiliary_system: str,
     auxiliary_efficiency: float,
+    backup_auxiliary_efficiency: float,
     timestep_hours: float,
     eta0: float,
     a1: float,
     a2: float,
     kwh_per_k_per_node: float,
+    tank_geometry: dict[str, float],
     pass_index: int,
 ) -> tuple[dict[str, float], pd.DataFrame, np.ndarray]:
     heating_return_temp = heating_supply_temp - heating_delta_t
@@ -478,21 +573,44 @@ def _simulate_single_pass(
     for row in weather_load_df.itertuples(index=False):
         tank_temp_start, tank_top_temp_start, tank_bottom_temp_start = tank_summary_temperatures(working_layers)
         storage_energy_start_kwh = tank_energy_from_layers(working_layers, tank_min_temp, kwh_per_k_per_node)
-        # Use the mean tank temperature as the charging reference so the collector
-        # is not forced to operate against the hottest top layer every hour.
-        collector_fluid_temp = max(heating_supply_temp, tank_temp_start) + solar_collector_delta_t / 2.0
-        solar_collected_kwh, efficiency = collector_output_kwh(
+        direct_mode_fluid_temp = heating_supply_temp + direct_solar_delivery_margin_c / 2.0
+        direct_mode_collected_kwh, direct_mode_efficiency = collector_output_kwh(
             area_m2=collector_area_m2,
             solar_rad_kwh_m2=row.solar_rad,
             outside_temp_c=row.outside_temp,
-            fluid_temp_c=collector_fluid_temp,
+            fluid_temp_c=direct_mode_fluid_temp,
+            timestep_hours=timestep_hours,
+            eta0=eta0,
+            a1=a1,
+            a2=a2,
+        )
+        storage_reference_temp = max(tank_temp_start, tank_min_temp)
+        storage_mode_fluid_temp = storage_reference_temp + solar_collector_delta_t / 2.0
+        storage_mode_collected_kwh, storage_mode_efficiency = collector_output_kwh(
+            area_m2=collector_area_m2,
+            solar_rad_kwh_m2=row.solar_rad,
+            outside_temp_c=row.outside_temp,
+            fluid_temp_c=storage_mode_fluid_temp,
             timestep_hours=timestep_hours,
             eta0=eta0,
             a1=a1,
             a2=a2,
         )
 
-        direct_solar_to_load_kwh = min(solar_collected_kwh, row.heating_load)
+        direct_mode_enabled = row.heating_load > 0 and direct_mode_collected_kwh > 0
+        if direct_mode_enabled:
+            solar_collected_kwh = direct_mode_collected_kwh
+            efficiency = direct_mode_efficiency
+            direct_solar_to_load_kwh = min(solar_collected_kwh, row.heating_load)
+            charge_source_temp = min(
+                tank_max_temp,
+                max(heating_supply_temp + direct_solar_delivery_margin_c, storage_reference_temp),
+            )
+        else:
+            solar_collected_kwh = storage_mode_collected_kwh
+            efficiency = storage_mode_efficiency
+            direct_solar_to_load_kwh = 0.0
+            charge_source_temp = min(tank_max_temp, storage_reference_temp + solar_collector_delta_t)
         remaining_load_kwh = row.heating_load - direct_solar_to_load_kwh
 
         surplus_solar_kwh = max(solar_collected_kwh - direct_solar_to_load_kwh, 0.0)
@@ -502,7 +620,6 @@ def _simulate_single_pass(
             0.0,
         )
         candidate_charge_kwh = min(surplus_solar_kwh, available_storage_kwh)
-        charge_source_temp = min(tank_max_temp, collector_fluid_temp + solar_collector_delta_t / 2.0)
         working_layers, tank_charge_kwh = charge_tank_layers(
             layer_temps_c=working_layers,
             charge_kwh=candidate_charge_kwh,
@@ -510,6 +627,12 @@ def _simulate_single_pass(
             tank_max_temp=tank_max_temp,
             kwh_per_k=kwh_per_k_per_node,
         )
+        if tank_charge_kwh > 0:
+            charge_fraction = tank_charge_kwh / max(candidate_charge_kwh, 1e-9)
+            working_layers = mix_tank_layers(
+                working_layers,
+                tank_geometry["charge_mixing_coeff_effective"] * charge_fraction,
+            )
         solar_curtailed_kwh = surplus_solar_kwh - tank_charge_kwh
         working_layers, solar_from_tank_direct_kwh = discharge_tank_above_threshold(
             layer_temps_c=working_layers,
@@ -517,6 +640,12 @@ def _simulate_single_pass(
             threshold_temp_c=heating_supply_temp,
             kwh_per_k=kwh_per_k_per_node,
         )
+        if solar_from_tank_direct_kwh > 0:
+            draw_fraction = solar_from_tank_direct_kwh / max(row.heating_load, 1e-9)
+            working_layers = mix_tank_layers(
+                working_layers,
+                tank_geometry["discharge_mixing_coeff_effective"] * draw_fraction,
+            )
         remaining_load_kwh -= solar_from_tank_direct_kwh
 
         solar_from_tank_via_hp_kwh = 0.0
@@ -537,11 +666,19 @@ def _simulate_single_pass(
                 solar_from_tank_via_hp_kwh = min(remaining_load_kwh, solar_from_tank_via_hp_kwh)
                 solar_from_tank_via_hp_source_kwh = solar_from_tank_via_hp_kwh * (1.0 - 1.0 / auxiliary_efficiency)
                 auxiliary_energy_for_hp_boost_kwh = solar_from_tank_via_hp_kwh / auxiliary_efficiency
+                hp_draw_fraction = solar_from_tank_via_hp_source_kwh / max(hp_source_needed_kwh, 1e-9)
+                working_layers = mix_tank_layers(
+                    working_layers,
+                    tank_geometry["discharge_mixing_coeff_effective"] * hp_draw_fraction,
+                )
                 remaining_load_kwh -= solar_from_tank_via_hp_kwh
 
         auxiliary_heating_delivered_kwh = max(remaining_load_kwh, 0.0)
         if auxiliary_system == "water_heat_pump" and auxiliary_efficiency > 1.0:
-            auxiliary_energy_input_kwh = auxiliary_heating_delivered_kwh / auxiliary_efficiency + auxiliary_energy_for_hp_boost_kwh
+            auxiliary_energy_input_kwh = (
+                auxiliary_heating_delivered_kwh / max(backup_auxiliary_efficiency, 1e-6)
+                + auxiliary_energy_for_hp_boost_kwh
+            )
         else:
             auxiliary_energy_input_kwh = (
                 auxiliary_heating_delivered_kwh / max(auxiliary_efficiency, 1e-6) + auxiliary_energy_for_hp_boost_kwh
@@ -554,6 +691,7 @@ def _simulate_single_pass(
             timestep_hours=timestep_hours,
             kwh_per_k=kwh_per_k_per_node,
         )
+        working_layers = mix_tank_layers(working_layers, tank_geometry["static_mixing_coeff_effective"])
         tank_temp_end, tank_top_temp_end, tank_bottom_temp_end = tank_summary_temperatures(working_layers)
         storage_energy_kwh = tank_energy_from_layers(working_layers, tank_min_temp, kwh_per_k_per_node)
 
@@ -619,6 +757,11 @@ def _simulate_single_pass(
                 "tank_discharge_total_kwh": tank_discharge_total_kwh,
                 "tank_loss_kwh": tank_loss_step_kwh,
                 "solar_energy_curtailed_kwh": solar_curtailed_kwh,
+                "tank_height_m": tank_geometry["tank_height_m"],
+                "tank_diameter_m": tank_geometry["tank_diameter_m"],
+                "tank_height_to_diameter_ratio": tank_geometry["tank_height_to_diameter_ratio"],
+                "stratification_efficiency": tank_geometry["stratification_efficiency"],
+                "collector_direct_mode_enabled": float(direct_mode_enabled),
             }
         )
 
@@ -645,9 +788,11 @@ def simulate_design(
     heating_supply_temp: float = 45.0,
     heating_delta_t: float = 10.0,
     solar_collector_delta_t: float = 10.0,
+    direct_solar_delivery_margin_c: float = 2.0,
     tank_thermal_loss_percent_per_day: float = 1.0,
     auxiliary_system: str = "electric",
     auxiliary_efficiency: float = 0.98,
+    backup_auxiliary_efficiency: float = 0.98,
     timestep_hours: float = 1.0,
     eta0: float = 0.72,
     a1: float = 3.2,
@@ -657,6 +802,14 @@ def simulate_design(
     short_term_cost_exponent: float = 0.78,
     seasonal_cost_coeff: float = 900.0,
     seasonal_cost_exponent: float = 0.82,
+    short_term_tank_height_m: float = TANK_GEOMETRY_DEFAULTS["short_term"]["height_m"],
+    seasonal_tank_height_m: float = TANK_GEOMETRY_DEFAULTS["seasonal"]["height_m"],
+    short_term_static_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["short_term"]["static_mixing_coeff"],
+    seasonal_static_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["seasonal"]["static_mixing_coeff"],
+    short_term_charge_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["short_term"]["charge_mixing_coeff"],
+    seasonal_charge_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["seasonal"]["charge_mixing_coeff"],
+    short_term_discharge_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["short_term"]["discharge_mixing_coeff"],
+    seasonal_discharge_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["seasonal"]["discharge_mixing_coeff"],
     electricity_price: float = 0.12,
     project_lifetime_years: float = 20.0,
     seasonal_max_years: int = 3,
@@ -678,6 +831,29 @@ def simulate_design(
     capacity_kwh = tank_volume_m3 * energy_per_m3_kwh(tank_min_temp, tank_max_temp)
     num_nodes = default_stratification_nodes(tank_type)
     kwh_per_k_per_node = layer_kwh_per_k(tank_volume_m3, num_nodes)
+    tank_geometry = tank_geometry_metrics(
+        tank_volume_m3=tank_volume_m3,
+        tank_height_m=tank_geometry_value(
+            tank_type,
+            short_term_value=short_term_tank_height_m,
+            seasonal_value=seasonal_tank_height_m,
+        ),
+        static_mixing_coeff=tank_geometry_value(
+            tank_type,
+            short_term_value=short_term_static_mixing_coeff,
+            seasonal_value=seasonal_static_mixing_coeff,
+        ),
+        charge_mixing_coeff=tank_geometry_value(
+            tank_type,
+            short_term_value=short_term_charge_mixing_coeff,
+            seasonal_value=seasonal_charge_mixing_coeff,
+        ),
+        discharge_mixing_coeff=tank_geometry_value(
+            tank_type,
+            short_term_value=short_term_discharge_mixing_coeff,
+            seasonal_value=seasonal_discharge_mixing_coeff,
+        ),
+    )
     tank_layers_c = create_tank_layers(initial_temp, num_nodes)
     seasonal_years = min(max(seasonal_max_years, 1), 3)
     if tank_type != "seasonal":
@@ -700,14 +876,17 @@ def simulate_design(
             heating_supply_temp=heating_supply_temp,
             heating_delta_t=heating_delta_t,
             solar_collector_delta_t=solar_collector_delta_t,
+            direct_solar_delivery_margin_c=direct_solar_delivery_margin_c,
             tank_thermal_loss_percent_per_day=tank_thermal_loss_percent_per_day,
             auxiliary_system=auxiliary_system,
             auxiliary_efficiency=auxiliary_efficiency,
+            backup_auxiliary_efficiency=backup_auxiliary_efficiency,
             timestep_hours=timestep_hours,
             eta0=eta0,
             a1=a1,
             a2=a2,
             kwh_per_k_per_node=kwh_per_k_per_node,
+            tank_geometry=tank_geometry,
             pass_index=pass_index,
         )
         end_energy_kwh = tank_energy_from_layers(end_layers, tank_min_temp, kwh_per_k_per_node)
@@ -752,6 +931,13 @@ def simulate_design(
         "tank_capacity_kwh": capacity_kwh,
         "initial_tank_temp_c": initial_temp,
         "tank_final_temp_c": float(records_df["tank_temp_end_c"].iloc[-1]) if not records_df.empty else initial_temp,
+        "tank_height_m": tank_geometry["tank_height_m"],
+        "tank_diameter_m": tank_geometry["tank_diameter_m"],
+        "tank_height_to_diameter_ratio": tank_geometry["tank_height_to_diameter_ratio"],
+        "stratification_efficiency": tank_geometry["stratification_efficiency"],
+        "static_mixing_coeff_effective": tank_geometry["static_mixing_coeff_effective"],
+        "charge_mixing_coeff_effective": tank_geometry["charge_mixing_coeff_effective"],
+        "discharge_mixing_coeff_effective": tank_geometry["discharge_mixing_coeff_effective"],
         "heating_return_temp_c": heating_return_temp,
         "seasonal_years_used": years_used,
         "seasonal_converged": converged if tank_type == "seasonal" else True,
@@ -787,10 +973,12 @@ def run_design_grid(
     heating_supply_temp: float = 45.0,
     heating_delta_t: float = 10.0,
     solar_collector_delta_t: float = 10.0,
+    direct_solar_delivery_margin_c: float = 2.0,
     short_term_loss_percent_per_day: float = 1.0,
     seasonal_loss_percent_per_day: float = 0.15,
     auxiliary_system: str = "electric",
     auxiliary_efficiency: float = 0.98,
+    backup_auxiliary_efficiency: float = 0.98,
     timestep_hours: float = 1.0,
     eta0: float = 0.72,
     a1: float = 3.2,
@@ -800,6 +988,14 @@ def run_design_grid(
     short_term_cost_exponent: float = 0.78,
     seasonal_cost_coeff: float = 900.0,
     seasonal_cost_exponent: float = 0.82,
+    short_term_tank_height_m: float = TANK_GEOMETRY_DEFAULTS["short_term"]["height_m"],
+    seasonal_tank_height_m: float = TANK_GEOMETRY_DEFAULTS["seasonal"]["height_m"],
+    short_term_static_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["short_term"]["static_mixing_coeff"],
+    seasonal_static_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["seasonal"]["static_mixing_coeff"],
+    short_term_charge_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["short_term"]["charge_mixing_coeff"],
+    seasonal_charge_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["seasonal"]["charge_mixing_coeff"],
+    short_term_discharge_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["short_term"]["discharge_mixing_coeff"],
+    seasonal_discharge_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["seasonal"]["discharge_mixing_coeff"],
     electricity_price: float = 0.12,
     project_lifetime_years: float = 20.0,
     progress_callback: Callable[[dict[str, float | str]], None] | None = None,
@@ -838,9 +1034,11 @@ def run_design_grid(
                     heating_supply_temp=heating_supply_temp,
                     heating_delta_t=heating_delta_t,
                     solar_collector_delta_t=solar_collector_delta_t,
+                    direct_solar_delivery_margin_c=direct_solar_delivery_margin_c,
                     tank_thermal_loss_percent_per_day=current_loss,
                     auxiliary_system=auxiliary_system,
                     auxiliary_efficiency=auxiliary_efficiency,
+                    backup_auxiliary_efficiency=backup_auxiliary_efficiency,
                     timestep_hours=timestep_hours,
                     eta0=eta0,
                     a1=a1,
@@ -850,6 +1048,14 @@ def run_design_grid(
                     short_term_cost_exponent=short_term_cost_exponent,
                     seasonal_cost_coeff=seasonal_cost_coeff,
                     seasonal_cost_exponent=seasonal_cost_exponent,
+                    short_term_tank_height_m=short_term_tank_height_m,
+                    seasonal_tank_height_m=seasonal_tank_height_m,
+                    short_term_static_mixing_coeff=short_term_static_mixing_coeff,
+                    seasonal_static_mixing_coeff=seasonal_static_mixing_coeff,
+                    short_term_charge_mixing_coeff=short_term_charge_mixing_coeff,
+                    seasonal_charge_mixing_coeff=seasonal_charge_mixing_coeff,
+                    short_term_discharge_mixing_coeff=short_term_discharge_mixing_coeff,
+                    seasonal_discharge_mixing_coeff=seasonal_discharge_mixing_coeff,
                     electricity_price=electricity_price,
                     project_lifetime_years=project_lifetime_years,
                 )
@@ -867,12 +1073,14 @@ def run_collector_area_study(
     heating_supply_temp: float = 45.0,
     heating_delta_t: float = 10.0,
     solar_collector_delta_t: float = 10.0,
+    direct_solar_delivery_margin_c: float = 2.0,
     short_term_loss_percent_per_day: float = 1.0,
     seasonal_loss_percent_per_day: float = 0.15,
     short_term_ratio_l_per_m2: float = 200.0,
     seasonal_ratio_l_per_m2: float = 2000.0,
     auxiliary_system: str = "electric",
     auxiliary_efficiency: float = 0.98,
+    backup_auxiliary_efficiency: float = 0.98,
     timestep_hours: float = 1.0,
     eta0: float = 0.72,
     a1: float = 3.2,
@@ -882,6 +1090,14 @@ def run_collector_area_study(
     short_term_cost_exponent: float = 0.78,
     seasonal_cost_coeff: float = 900.0,
     seasonal_cost_exponent: float = 0.82,
+    short_term_tank_height_m: float = TANK_GEOMETRY_DEFAULTS["short_term"]["height_m"],
+    seasonal_tank_height_m: float = TANK_GEOMETRY_DEFAULTS["seasonal"]["height_m"],
+    short_term_static_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["short_term"]["static_mixing_coeff"],
+    seasonal_static_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["seasonal"]["static_mixing_coeff"],
+    short_term_charge_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["short_term"]["charge_mixing_coeff"],
+    seasonal_charge_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["seasonal"]["charge_mixing_coeff"],
+    short_term_discharge_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["short_term"]["discharge_mixing_coeff"],
+    seasonal_discharge_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["seasonal"]["discharge_mixing_coeff"],
     electricity_price: float = 0.12,
     project_lifetime_years: float = 20.0,
     progress_callback: Callable[[dict[str, float | str]], None] | None = None,
@@ -924,9 +1140,11 @@ def run_collector_area_study(
                 heating_supply_temp=heating_supply_temp,
                 heating_delta_t=heating_delta_t,
                 solar_collector_delta_t=solar_collector_delta_t,
+                direct_solar_delivery_margin_c=direct_solar_delivery_margin_c,
                 tank_thermal_loss_percent_per_day=current_loss,
                 auxiliary_system=auxiliary_system,
                 auxiliary_efficiency=auxiliary_efficiency,
+                backup_auxiliary_efficiency=backup_auxiliary_efficiency,
                 timestep_hours=timestep_hours,
                 eta0=eta0,
                 a1=a1,
@@ -936,6 +1154,14 @@ def run_collector_area_study(
                 short_term_cost_exponent=short_term_cost_exponent,
                 seasonal_cost_coeff=seasonal_cost_coeff,
                 seasonal_cost_exponent=seasonal_cost_exponent,
+                short_term_tank_height_m=short_term_tank_height_m,
+                seasonal_tank_height_m=seasonal_tank_height_m,
+                short_term_static_mixing_coeff=short_term_static_mixing_coeff,
+                seasonal_static_mixing_coeff=seasonal_static_mixing_coeff,
+                short_term_charge_mixing_coeff=short_term_charge_mixing_coeff,
+                seasonal_charge_mixing_coeff=seasonal_charge_mixing_coeff,
+                short_term_discharge_mixing_coeff=short_term_discharge_mixing_coeff,
+                seasonal_discharge_mixing_coeff=seasonal_discharge_mixing_coeff,
                 electricity_price=electricity_price,
                 project_lifetime_years=project_lifetime_years,
             )
@@ -955,10 +1181,12 @@ def run_tank_size_study(
     heating_supply_temp: float = 45.0,
     heating_delta_t: float = 10.0,
     solar_collector_delta_t: float = 10.0,
+    direct_solar_delivery_margin_c: float = 2.0,
     short_term_loss_percent_per_day: float = 1.0,
     seasonal_loss_percent_per_day: float = 0.15,
     auxiliary_system: str = "electric",
     auxiliary_efficiency: float = 0.98,
+    backup_auxiliary_efficiency: float = 0.98,
     timestep_hours: float = 1.0,
     eta0: float = 0.72,
     a1: float = 3.2,
@@ -968,6 +1196,14 @@ def run_tank_size_study(
     short_term_cost_exponent: float = 0.78,
     seasonal_cost_coeff: float = 900.0,
     seasonal_cost_exponent: float = 0.82,
+    short_term_tank_height_m: float = TANK_GEOMETRY_DEFAULTS["short_term"]["height_m"],
+    seasonal_tank_height_m: float = TANK_GEOMETRY_DEFAULTS["seasonal"]["height_m"],
+    short_term_static_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["short_term"]["static_mixing_coeff"],
+    seasonal_static_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["seasonal"]["static_mixing_coeff"],
+    short_term_charge_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["short_term"]["charge_mixing_coeff"],
+    seasonal_charge_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["seasonal"]["charge_mixing_coeff"],
+    short_term_discharge_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["short_term"]["discharge_mixing_coeff"],
+    seasonal_discharge_mixing_coeff: float = TANK_GEOMETRY_DEFAULTS["seasonal"]["discharge_mixing_coeff"],
     electricity_price: float = 0.12,
     project_lifetime_years: float = 20.0,
     progress_callback: Callable[[dict[str, float | str]], None] | None = None,
@@ -1005,9 +1241,11 @@ def run_tank_size_study(
                 heating_supply_temp=heating_supply_temp,
                 heating_delta_t=heating_delta_t,
                 solar_collector_delta_t=solar_collector_delta_t,
+                direct_solar_delivery_margin_c=direct_solar_delivery_margin_c,
                 tank_thermal_loss_percent_per_day=current_loss,
                 auxiliary_system=auxiliary_system,
                 auxiliary_efficiency=auxiliary_efficiency,
+                backup_auxiliary_efficiency=backup_auxiliary_efficiency,
                 timestep_hours=timestep_hours,
                 eta0=eta0,
                 a1=a1,
@@ -1017,6 +1255,14 @@ def run_tank_size_study(
                 short_term_cost_exponent=short_term_cost_exponent,
                 seasonal_cost_coeff=seasonal_cost_coeff,
                 seasonal_cost_exponent=seasonal_cost_exponent,
+                short_term_tank_height_m=short_term_tank_height_m,
+                seasonal_tank_height_m=seasonal_tank_height_m,
+                short_term_static_mixing_coeff=short_term_static_mixing_coeff,
+                seasonal_static_mixing_coeff=seasonal_static_mixing_coeff,
+                short_term_charge_mixing_coeff=short_term_charge_mixing_coeff,
+                seasonal_charge_mixing_coeff=seasonal_charge_mixing_coeff,
+                short_term_discharge_mixing_coeff=short_term_discharge_mixing_coeff,
+                seasonal_discharge_mixing_coeff=seasonal_discharge_mixing_coeff,
                 electricity_price=electricity_price,
                 project_lifetime_years=project_lifetime_years,
             )
@@ -1078,6 +1324,7 @@ def analyze_input_data(
     heating_hours = df["heating_load"] > 0
 
     annual_heating_load_kwh = float(df["heating_load"].sum())
+    average_heating_load_kwh = float(df["heating_load"].mean())
     heating_season_load_kwh = float(df.loc[heating_hours, "heating_load"].sum())
     annual_tilted_solar_kwh_m2 = float(df["solar_rad"].sum())
     annual_horizontal_solar_kwh_m2 = float(df.get("horizontal_solar_rad", pd.Series(dtype=float)).fillna(0.0).sum())
@@ -1097,6 +1344,7 @@ def analyze_input_data(
         df.groupby("month", as_index=False)
         .agg(
             heating_load_kwh=("heating_load", "sum"),
+            average_heating_load_kwh=("heating_load", "mean"),
             solar_rad_kwh_m2=("solar_rad", "sum"),
             horizontal_solar_rad_kwh_m2=("horizontal_solar_rad", "sum") if "horizontal_solar_rad" in df else ("solar_rad", "size"),
             mean_outside_temp_c=("outside_temp", "mean"),
@@ -1112,6 +1360,7 @@ def analyze_input_data(
 
     summary = {
         "annual_heating_load_kwh": annual_heating_load_kwh,
+        "average_heating_load_kwh": average_heating_load_kwh,
         "heating_season_load_kwh": heating_season_load_kwh,
         "annual_tilted_solar_kwh_m2": annual_tilted_solar_kwh_m2,
         "annual_horizontal_solar_kwh_m2": annual_horizontal_solar_kwh_m2,
@@ -1160,13 +1409,36 @@ def monthly_performance_from_hourly(hourly_df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def append_annual_summary_row(df: pd.DataFrame, label_column: str = "month", annual_label: str = "Annual Summary") -> pd.DataFrame:
+    if df is None or df.empty or label_column not in df.columns:
+        return df
+    if df[label_column].astype(str).str.lower().eq(annual_label.lower()).any():
+        return df
+
+    annual_row: dict[str, object] = {label_column: annual_label}
+    for column in df.columns:
+        if column == label_column:
+            continue
+        series = df[column]
+        if not pd.api.types.is_numeric_dtype(series):
+            annual_row[column] = ""
+            continue
+        normalized = str(column).lower()
+        if normalized.startswith("average_") or normalized.startswith("mean_") or normalized.endswith("_pct"):
+            annual_row[column] = float(series.mean()) if len(series) else 0.0
+        else:
+            annual_row[column] = float(series.sum())
+
+    return pd.concat([df, pd.DataFrame([annual_row])], ignore_index=True)
+
+
 def export_case_report(
     output_path: str | Path,
-    optimized_df: pd.DataFrame,
-    step1_df: pd.DataFrame,
-    step2_df: pd.DataFrame,
+    optimized_df: pd.DataFrame | None,
+    step1_df: pd.DataFrame | None,
+    step2_df: pd.DataFrame | None,
     final_summary: dict[str, float | str],
-    final_hourly_df: pd.DataFrame,
+    final_hourly_df: pd.DataFrame | None,
     project_inputs: dict[str, float | str] | None = None,
     monthly_summary_df: pd.DataFrame | None = None,
     input_monthly_df: pd.DataFrame | None = None,
@@ -1176,22 +1448,111 @@ def export_case_report(
 
     project_inputs_df = pd.DataFrame([project_inputs]) if project_inputs else pd.DataFrame()
     final_summary_df = pd.DataFrame([final_summary])
+    optimized_export_df = optimized_df if optimized_df is not None else pd.DataFrame()
+    step1_export_df = step1_df if step1_df is not None else pd.DataFrame()
+    step2_export_df = step2_df if step2_df is not None else pd.DataFrame()
+    final_hourly_export_df = final_hourly_df if final_hourly_df is not None else pd.DataFrame()
     final_monthly_df = (
         monthly_summary_df.copy()
         if monthly_summary_df is not None and not monthly_summary_df.empty
-        else (monthly_performance_from_hourly(final_hourly_df) if not final_hourly_df.empty else pd.DataFrame())
+        else (monthly_performance_from_hourly(final_hourly_export_df) if not final_hourly_export_df.empty else pd.DataFrame())
     )
+    final_monthly_df = append_annual_summary_row(final_monthly_df)
+    input_monthly_export_df = append_annual_summary_row(input_monthly_df.copy()) if input_monthly_df is not None and not input_monthly_df.empty else input_monthly_df
+
+    def format_sheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) -> None:
+        if df is None or df.empty:
+            return
+        ws = writer.book[sheet_name]
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        ws.sheet_view.showGridLines = False
+
+        header_fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
+        header_font = Font(bold=True, color="1F1F1F")
+        header_alignment = Alignment(horizontal="center", vertical="center")
+        body_alignment = Alignment(vertical="center")
+        thin_border = Border(
+            left=Side(style="thin", color="D9D9D9"),
+            right=Side(style="thin", color="D9D9D9"),
+            top=Side(style="thin", color="D9D9D9"),
+            bottom=Side(style="thin", color="D9D9D9"),
+        )
+
+        currency_columns = {"annualized_total_cost", "annualized_capital_cost", "annual_auxiliary_energy_cost", "collector_capital_cost", "tank_capital_cost"}
+        percent_columns = {
+            "solar_coverage_pct",
+            "solar_heating_ratio_pct",
+            "auxiliary_fraction_pct",
+            "collector_efficiency_pct",
+            "solar_heat_ratio_pct",
+        }
+        integer_columns = {"seasonal_years_used", "seasonal_max_years", "simulation_year_index"}
+        datetime_columns = {"timestamp"}
+
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = header_alignment
+            cell.border = thin_border
+
+        for row in ws.iter_rows(min_row=2):
+            for cell in row:
+                cell.alignment = body_alignment
+                cell.border = thin_border
+
+        for col_idx, column_name in enumerate(df.columns, start=1):
+            column_letter = get_column_letter(col_idx)
+            series = df[column_name]
+            max_len = max(
+                len(str(column_name)),
+                max((len(str(value)) for value in series.head(500).fillna("")), default=0),
+            )
+            ws.column_dimensions[column_letter].width = min(max(max_len + 2, 12), 26)
+
+            if column_name in datetime_columns:
+                for cell in ws[column_letter][1:]:
+                    if cell.value is not None:
+                        cell.number_format = "yyyy-mm-dd hh:mm"
+            elif column_name in currency_columns:
+                for cell in ws[column_letter][1:]:
+                    if isinstance(cell.value, (int, float)):
+                        cell.number_format = '"RMB" #,##0.00'
+            elif column_name in percent_columns:
+                for cell in ws[column_letter][1:]:
+                    if isinstance(cell.value, (int, float)):
+                        cell.number_format = "0.00"
+            elif column_name in integer_columns:
+                for cell in ws[column_letter][1:]:
+                    if isinstance(cell.value, (int, float)):
+                        cell.number_format = "0"
+            elif pd.api.types.is_numeric_dtype(series):
+                for cell in ws[column_letter][1:]:
+                    if isinstance(cell.value, (int, float)):
+                        cell.number_format = "#,##0.00"
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         if not project_inputs_df.empty:
             project_inputs_df.to_excel(writer, sheet_name="project_inputs", index=False)
+            format_sheet(writer, "project_inputs", project_inputs_df)
         final_summary_df.to_excel(writer, sheet_name="final_summary", index=False)
-        step1_df.to_excel(writer, sheet_name="step1_results", index=False)
-        step2_df.to_excel(writer, sheet_name="step2_results", index=False)
-        optimized_df.to_excel(writer, sheet_name="optimization_grid", index=False)
+        format_sheet(writer, "final_summary", final_summary_df)
+        if not step1_export_df.empty:
+            step1_export_df.to_excel(writer, sheet_name="step1_results", index=False)
+            format_sheet(writer, "step1_results", step1_export_df)
+        if not step2_export_df.empty:
+            step2_export_df.to_excel(writer, sheet_name="step2_results", index=False)
+            format_sheet(writer, "step2_results", step2_export_df)
+        if not optimized_export_df.empty:
+            optimized_export_df.to_excel(writer, sheet_name="optimization_grid", index=False)
+            format_sheet(writer, "optimization_grid", optimized_export_df)
         final_monthly_df.to_excel(writer, sheet_name="monthly_summary", index=False)
-        final_hourly_df.to_excel(writer, sheet_name="hourly_results", index=False)
-        if input_monthly_df is not None and not input_monthly_df.empty:
-            input_monthly_df.to_excel(writer, sheet_name="input_monthly_data", index=False)
+        format_sheet(writer, "monthly_summary", final_monthly_df)
+        if not final_hourly_export_df.empty:
+            final_hourly_export_df.to_excel(writer, sheet_name="hourly_results", index=False)
+            format_sheet(writer, "hourly_results", final_hourly_export_df)
+        if input_monthly_export_df is not None and not input_monthly_export_df.empty:
+            input_monthly_export_df.to_excel(writer, sheet_name="input_monthly_data", index=False)
+            format_sheet(writer, "input_monthly_data", input_monthly_export_df)
 
     return output_path

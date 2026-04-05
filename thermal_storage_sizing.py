@@ -32,8 +32,17 @@ def main() -> None:
     parser.add_argument("--heating-supply-temp", type=float, default=45.0)
     parser.add_argument("--heating-delta-t", type=float, default=10.0)
     parser.add_argument("--solar-collector-delta-t", type=float, default=10.0)
+    parser.add_argument("--direct-solar-delivery-margin", type=float, default=2.0)
     parser.add_argument("--short-term-loss", type=float, default=1.0)
     parser.add_argument("--seasonal-loss", type=float, default=0.15)
+    parser.add_argument("--short-term-tank-height", type=float, default=2.4)
+    parser.add_argument("--seasonal-tank-height", type=float, default=7.5)
+    parser.add_argument("--short-term-static-mixing", type=float, default=0.020)
+    parser.add_argument("--seasonal-static-mixing", type=float, default=0.010)
+    parser.add_argument("--short-term-charge-mixing", type=float, default=0.080)
+    parser.add_argument("--seasonal-charge-mixing", type=float, default=0.045)
+    parser.add_argument("--short-term-discharge-mixing", type=float, default=0.060)
+    parser.add_argument("--seasonal-discharge-mixing", type=float, default=0.035)
     parser.add_argument("--auxiliary-system", default="water_heat_pump", choices=["electric", "boiler", "water_heat_pump"])
     parser.add_argument("--auxiliary-efficiency", type=float, default=3.5)
     parser.add_argument("--collector-cost-per-m2", type=float, default=300.0)
@@ -77,8 +86,17 @@ def main() -> None:
         heating_supply_temp=args.heating_supply_temp,
         heating_delta_t=args.heating_delta_t,
         solar_collector_delta_t=args.solar_collector_delta_t,
+        direct_solar_delivery_margin_c=args.direct_solar_delivery_margin,
         short_term_loss_percent_per_day=args.short_term_loss,
         seasonal_loss_percent_per_day=args.seasonal_loss,
+        short_term_tank_height_m=args.short_term_tank_height,
+        seasonal_tank_height_m=args.seasonal_tank_height,
+        short_term_static_mixing_coeff=args.short_term_static_mixing,
+        seasonal_static_mixing_coeff=args.seasonal_static_mixing,
+        short_term_charge_mixing_coeff=args.short_term_charge_mixing,
+        seasonal_charge_mixing_coeff=args.seasonal_charge_mixing,
+        short_term_discharge_mixing_coeff=args.short_term_discharge_mixing,
+        seasonal_discharge_mixing_coeff=args.seasonal_discharge_mixing,
         auxiliary_system=args.auxiliary_system,
         auxiliary_efficiency=args.auxiliary_efficiency,
         timestep_hours=args.timestep_hours,
@@ -99,6 +117,10 @@ def main() -> None:
     print(f"  Tank type: {best['tank_type_label']}")
     print(f"  Collector area: {best['collector_area_m2']:.2f} m2")
     print(f"  Tank size: {best['tank_volume_m3']:.2f} m3")
+    print(f"  Tank height: {best['tank_height_m']:.2f} m")
+    print(f"  Tank diameter: {best['tank_diameter_m']:.2f} m")
+    print(f"  Height/diameter ratio: {best['tank_height_to_diameter_ratio']:.2f}")
+    print(f"  Stratification efficiency: {best['stratification_efficiency']:.2f}")
     print(f"  Tank capacity: {best['tank_capacity_kwh']:.2f} kWh")
     print(f"  Solar energy collected: {best['solar_energy_collected_kwh']:.2f} kWh")
     print(f"  Solar energy for heating: {best['solar_energy_for_heating_kwh']:.2f} kWh")
