@@ -244,6 +244,7 @@ def collector_output_kwh(
     eta0: float,
     a1: float,
     a2: float,
+    collector_soiling_factor: float = 1.0,
 ) -> tuple[float, float]:
     if solar_rad_kwh_m2 <= 0 or area_m2 <= 0:
         return 0.0, 0.0
@@ -251,7 +252,7 @@ def collector_output_kwh(
     irradiance_w_m2 = solar_rad_kwh_m2 * 1000.0 / max(timestep_hours, 1e-9)
     delta_t = fluid_temp_c - outside_temp_c
     eta = eta0 - a1 * delta_t / max(irradiance_w_m2, 1e-6) - a2 * delta_t**2 / max(irradiance_w_m2, 1e-6)
-    eta = float(np.clip(eta, 0.0, 0.85))
+    eta = float(np.clip(eta, 0.0, 0.85)) * float(np.clip(collector_soiling_factor, 0.0, 1.0))
     collected_kwh = area_m2 * solar_rad_kwh_m2 * eta
     return collected_kwh, eta
 
@@ -377,15 +378,25 @@ def tank_geometry_metrics(
 ) -> dict[str, float]:
     tank_diameter_m = tank_diameter_from_volume_height(tank_volume_m3, tank_height_m)
     height_to_diameter_ratio = tank_height_m / max(tank_diameter_m, 1e-9)
-    stratification_efficiency = stratification_efficiency_from_geometry(
-        tank_height_m=tank_height_m,
-        tank_diameter_m=tank_diameter_m,
+    ideal_stratification = bool(
+        np.isclose(static_mixing_coeff, 0.0)
+        and np.isclose(charge_mixing_coeff, 0.0)
+        and np.isclose(discharge_mixing_coeff, 0.0)
+    )
+    stratification_efficiency = (
+        1.0
+        if ideal_stratification
+        else stratification_efficiency_from_geometry(
+            tank_height_m=tank_height_m,
+            tank_diameter_m=tank_diameter_m,
+        )
     )
     return {
         "tank_height_m": float(tank_height_m),
         "tank_diameter_m": tank_diameter_m,
         "tank_height_to_diameter_ratio": float(height_to_diameter_ratio),
         "stratification_efficiency": stratification_efficiency,
+        "ideal_stratification": float(ideal_stratification),
         "static_mixing_coeff_effective": adjusted_mixing_coefficient(
             static_mixing_coeff,
             stratification_efficiency,
@@ -545,6 +556,7 @@ def _simulate_single_pass(
     eta0: float,
     a1: float,
     a2: float,
+    collector_soiling_factor: float,
     kwh_per_k_per_node: float,
     tank_geometry: dict[str, float],
     pass_index: int,
@@ -573,67 +585,65 @@ def _simulate_single_pass(
     for row in weather_load_df.itertuples(index=False):
         tank_temp_start, tank_top_temp_start, tank_bottom_temp_start = tank_summary_temperatures(working_layers)
         storage_energy_start_kwh = tank_energy_from_layers(working_layers, tank_min_temp, kwh_per_k_per_node)
-        direct_mode_fluid_temp = heating_supply_temp + direct_solar_delivery_margin_c / 2.0
-        direct_mode_collected_kwh, direct_mode_efficiency = collector_output_kwh(
-            area_m2=collector_area_m2,
-            solar_rad_kwh_m2=row.solar_rad,
-            outside_temp_c=row.outside_temp,
-            fluid_temp_c=direct_mode_fluid_temp,
-            timestep_hours=timestep_hours,
-            eta0=eta0,
-            a1=a1,
-            a2=a2,
-        )
-        storage_reference_temp = max(tank_temp_start, tank_min_temp)
-        storage_mode_fluid_temp = storage_reference_temp + solar_collector_delta_t / 2.0
-        storage_mode_collected_kwh, storage_mode_efficiency = collector_output_kwh(
-            area_m2=collector_area_m2,
-            solar_rad_kwh_m2=row.solar_rad,
-            outside_temp_c=row.outside_temp,
-            fluid_temp_c=storage_mode_fluid_temp,
-            timestep_hours=timestep_hours,
-            eta0=eta0,
-            a1=a1,
-            a2=a2,
-        )
-
-        direct_mode_enabled = row.heating_load > 0 and direct_mode_collected_kwh > 0
-        if direct_mode_enabled:
-            solar_collected_kwh = direct_mode_collected_kwh
-            efficiency = direct_mode_efficiency
-            direct_solar_to_load_kwh = min(solar_collected_kwh, row.heating_load)
-            charge_source_temp = min(
-                tank_max_temp,
-                max(heating_supply_temp + direct_solar_delivery_margin_c, storage_reference_temp),
-            )
-        else:
-            solar_collected_kwh = storage_mode_collected_kwh
-            efficiency = storage_mode_efficiency
+        collector_enabled = not (tank_type == "short_term" and row.heating_load <= 0)
+        if not collector_enabled:
+            solar_collected_kwh = 0.0
+            efficiency = 0.0
             direct_solar_to_load_kwh = 0.0
-            charge_source_temp = min(tank_max_temp, storage_reference_temp + solar_collector_delta_t)
-        remaining_load_kwh = row.heating_load - direct_solar_to_load_kwh
-
-        surplus_solar_kwh = max(solar_collected_kwh - direct_solar_to_load_kwh, 0.0)
-        available_storage_kwh = max(
-            tank_volume_kwh_capacity_from_layers(working_layers, tank_min_temp, tank_max_temp, kwh_per_k_per_node)
-            - storage_energy_start_kwh,
-            0.0,
-        )
-        candidate_charge_kwh = min(surplus_solar_kwh, available_storage_kwh)
-        working_layers, tank_charge_kwh = charge_tank_layers(
-            layer_temps_c=working_layers,
-            charge_kwh=candidate_charge_kwh,
-            source_temp_c=charge_source_temp,
-            tank_max_temp=tank_max_temp,
-            kwh_per_k=kwh_per_k_per_node,
-        )
-        if tank_charge_kwh > 0:
-            charge_fraction = tank_charge_kwh / max(candidate_charge_kwh, 1e-9)
-            working_layers = mix_tank_layers(
-                working_layers,
-                tank_geometry["charge_mixing_coeff_effective"] * charge_fraction,
+            remaining_load_kwh = row.heating_load
+            surplus_solar_kwh = 0.0
+            tank_charge_kwh = 0.0
+            solar_curtailed_kwh = 0.0
+            direct_mode_enabled = False
+            charge_source_temp = tank_temp_start
+        else:
+            collector_inlet_temp = max(tank_temp_start, tank_min_temp)
+            collector_outlet_temp = min(collector_inlet_temp + solar_collector_delta_t, tank_max_temp)
+            collector_mean_fluid_temp = (collector_inlet_temp + collector_outlet_temp) / 2.0
+            solar_collected_kwh, efficiency = collector_output_kwh(
+                area_m2=collector_area_m2,
+                solar_rad_kwh_m2=row.solar_rad,
+                outside_temp_c=row.outside_temp,
+                fluid_temp_c=collector_mean_fluid_temp,
+                timestep_hours=timestep_hours,
+                eta0=eta0,
+                a1=a1,
+                a2=a2,
+                collector_soiling_factor=collector_soiling_factor,
             )
-        solar_curtailed_kwh = surplus_solar_kwh - tank_charge_kwh
+            direct_mode_enabled = (
+                row.heating_load > 0
+                and solar_collected_kwh > 0
+                and collector_outlet_temp >= heating_supply_temp
+            )
+            if direct_mode_enabled:
+                direct_solar_to_load_kwh = min(solar_collected_kwh, row.heating_load)
+            else:
+                direct_solar_to_load_kwh = 0.0
+            charge_source_temp = collector_outlet_temp
+            remaining_load_kwh = row.heating_load - direct_solar_to_load_kwh
+
+            surplus_solar_kwh = max(solar_collected_kwh - direct_solar_to_load_kwh, 0.0)
+            available_storage_kwh = max(
+                tank_volume_kwh_capacity_from_layers(working_layers, tank_min_temp, tank_max_temp, kwh_per_k_per_node)
+                - storage_energy_start_kwh,
+                0.0,
+            )
+            candidate_charge_kwh = min(surplus_solar_kwh, available_storage_kwh)
+            working_layers, tank_charge_kwh = charge_tank_layers(
+                layer_temps_c=working_layers,
+                charge_kwh=candidate_charge_kwh,
+                source_temp_c=charge_source_temp,
+                tank_max_temp=tank_max_temp,
+                kwh_per_k=kwh_per_k_per_node,
+            )
+            if tank_charge_kwh > 0:
+                charge_fraction = tank_charge_kwh / max(candidate_charge_kwh, 1e-9)
+                working_layers = mix_tank_layers(
+                    working_layers,
+                    tank_geometry["charge_mixing_coeff_effective"] * charge_fraction,
+                )
+            solar_curtailed_kwh = surplus_solar_kwh - tank_charge_kwh
         working_layers, solar_from_tank_direct_kwh = discharge_tank_above_threshold(
             layer_temps_c=working_layers,
             demand_kwh=remaining_load_kwh,
@@ -788,7 +798,7 @@ def simulate_design(
     heating_supply_temp: float = 45.0,
     heating_delta_t: float = 10.0,
     solar_collector_delta_t: float = 10.0,
-    direct_solar_delivery_margin_c: float = 2.0,
+    direct_solar_delivery_margin_c: float = 0.0,
     tank_thermal_loss_percent_per_day: float = 1.0,
     auxiliary_system: str = "electric",
     auxiliary_efficiency: float = 0.98,
@@ -797,6 +807,7 @@ def simulate_design(
     eta0: float = 0.72,
     a1: float = 3.2,
     a2: float = 0.0,
+    collector_soiling_factor: float = 1.0,
     collector_cost_per_m2: float = 300.0,
     short_term_cost_coeff: float = 1400.0,
     short_term_cost_exponent: float = 0.78,
@@ -885,6 +896,7 @@ def simulate_design(
             eta0=eta0,
             a1=a1,
             a2=a2,
+            collector_soiling_factor=collector_soiling_factor,
             kwh_per_k_per_node=kwh_per_k_per_node,
             tank_geometry=tank_geometry,
             pass_index=pass_index,
@@ -973,7 +985,7 @@ def run_design_grid(
     heating_supply_temp: float = 45.0,
     heating_delta_t: float = 10.0,
     solar_collector_delta_t: float = 10.0,
-    direct_solar_delivery_margin_c: float = 2.0,
+    direct_solar_delivery_margin_c: float = 0.0,
     short_term_loss_percent_per_day: float = 1.0,
     seasonal_loss_percent_per_day: float = 0.15,
     auxiliary_system: str = "electric",
@@ -983,6 +995,7 @@ def run_design_grid(
     eta0: float = 0.72,
     a1: float = 3.2,
     a2: float = 0.0,
+    collector_soiling_factor: float = 1.0,
     collector_cost_per_m2: float = 300.0,
     short_term_cost_coeff: float = 1400.0,
     short_term_cost_exponent: float = 0.78,
@@ -1043,6 +1056,7 @@ def run_design_grid(
                     eta0=eta0,
                     a1=a1,
                     a2=a2,
+                    collector_soiling_factor=collector_soiling_factor,
                     collector_cost_per_m2=collector_cost_per_m2,
                     short_term_cost_coeff=short_term_cost_coeff,
                     short_term_cost_exponent=short_term_cost_exponent,
@@ -1073,7 +1087,7 @@ def run_collector_area_study(
     heating_supply_temp: float = 45.0,
     heating_delta_t: float = 10.0,
     solar_collector_delta_t: float = 10.0,
-    direct_solar_delivery_margin_c: float = 2.0,
+    direct_solar_delivery_margin_c: float = 0.0,
     short_term_loss_percent_per_day: float = 1.0,
     seasonal_loss_percent_per_day: float = 0.15,
     short_term_ratio_l_per_m2: float = 200.0,
@@ -1085,6 +1099,7 @@ def run_collector_area_study(
     eta0: float = 0.72,
     a1: float = 3.2,
     a2: float = 0.0,
+    collector_soiling_factor: float = 1.0,
     collector_cost_per_m2: float = 300.0,
     short_term_cost_coeff: float = 1400.0,
     short_term_cost_exponent: float = 0.78,
@@ -1149,6 +1164,7 @@ def run_collector_area_study(
                 eta0=eta0,
                 a1=a1,
                 a2=a2,
+                collector_soiling_factor=collector_soiling_factor,
                 collector_cost_per_m2=collector_cost_per_m2,
                 short_term_cost_coeff=short_term_cost_coeff,
                 short_term_cost_exponent=short_term_cost_exponent,
@@ -1181,7 +1197,7 @@ def run_tank_size_study(
     heating_supply_temp: float = 45.0,
     heating_delta_t: float = 10.0,
     solar_collector_delta_t: float = 10.0,
-    direct_solar_delivery_margin_c: float = 2.0,
+    direct_solar_delivery_margin_c: float = 0.0,
     short_term_loss_percent_per_day: float = 1.0,
     seasonal_loss_percent_per_day: float = 0.15,
     auxiliary_system: str = "electric",
@@ -1191,6 +1207,7 @@ def run_tank_size_study(
     eta0: float = 0.72,
     a1: float = 3.2,
     a2: float = 0.0,
+    collector_soiling_factor: float = 1.0,
     collector_cost_per_m2: float = 300.0,
     short_term_cost_coeff: float = 1400.0,
     short_term_cost_exponent: float = 0.78,
@@ -1250,6 +1267,7 @@ def run_tank_size_study(
                 eta0=eta0,
                 a1=a1,
                 a2=a2,
+                collector_soiling_factor=collector_soiling_factor,
                 collector_cost_per_m2=collector_cost_per_m2,
                 short_term_cost_coeff=short_term_cost_coeff,
                 short_term_cost_exponent=short_term_cost_exponent,
@@ -1287,6 +1305,7 @@ def estimate_reference_collector_efficiency(
     eta0: float,
     a1: float,
     a2: float,
+    collector_soiling_factor: float = 1.0,
     timestep_hours: float = 1.0,
 ) -> float:
     positive_radiation = weather_load_df[weather_load_df["solar_rad"] > 0].copy()
@@ -1305,6 +1324,7 @@ def estimate_reference_collector_efficiency(
             eta0=eta0,
             a1=a1,
             a2=a2,
+            collector_soiling_factor=collector_soiling_factor,
         )
         efficiencies.append(efficiency)
     return float(np.clip(np.mean(efficiencies), 0.1, 0.85))
@@ -1317,6 +1337,7 @@ def analyze_input_data(
     eta0: float = 0.72,
     a1: float = 3.2,
     a2: float = 0.0,
+    collector_soiling_factor: float = 1.0,
     timestep_hours: float = 1.0,
 ) -> tuple[dict[str, float], pd.DataFrame, pd.DataFrame]:
     df = weather_load_df.copy()
@@ -1337,6 +1358,7 @@ def analyze_input_data(
         eta0=eta0,
         a1=a1,
         a2=a2,
+        collector_soiling_factor=collector_soiling_factor,
         timestep_hours=timestep_hours,
     )
 

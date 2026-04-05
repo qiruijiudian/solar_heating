@@ -32,7 +32,7 @@ def main() -> None:
     parser.add_argument("--heating-supply-temp", type=float, default=45.0)
     parser.add_argument("--heating-delta-t", type=float, default=10.0)
     parser.add_argument("--solar-collector-delta-t", type=float, default=10.0)
-    parser.add_argument("--direct-solar-delivery-margin", type=float, default=2.0)
+    parser.add_argument("--direct-solar-delivery-margin", type=float, default=0.0)
     parser.add_argument("--short-term-loss", type=float, default=1.0)
     parser.add_argument("--seasonal-loss", type=float, default=0.15)
     parser.add_argument("--short-term-tank-height", type=float, default=2.4)
@@ -51,6 +51,7 @@ def main() -> None:
     parser.add_argument("--eta0", type=float, default=0.72)
     parser.add_argument("--a1", type=float, default=3.2)
     parser.add_argument("--a2", type=float, default=0.0)
+    parser.add_argument("--collector-soiling-factor", type=float, default=1.0)
     parser.add_argument("--area-list", default="")
     parser.add_argument("--tank-size-list", default="")
     parser.add_argument("--area-min", type=float, default=50.0)
@@ -103,6 +104,7 @@ def main() -> None:
         eta0=args.eta0,
         a1=args.a1,
         a2=args.a2,
+        collector_soiling_factor=args.collector_soiling_factor,
         collector_cost_per_m2=args.collector_cost_per_m2,
         electricity_price=args.electricity_price,
         project_lifetime_years=args.project_lifetime_years,

@@ -50,6 +50,12 @@ COLLECTOR_TYPE_PRESETS = {
 
 TANK_OPERATION_PRESETS = {
     "short_term": {
+        "Ideal": {
+            "height_m": 3.5,
+            "static_mixing_coeff": 0.0,
+            "charge_mixing_coeff": 0.0,
+            "discharge_mixing_coeff": 0.0,
+        },
         "Good": {
             "height_m": 3.0,
             "static_mixing_coeff": 0.010,
@@ -70,6 +76,12 @@ TANK_OPERATION_PRESETS = {
         },
     },
     "seasonal": {
+        "Ideal": {
+            "height_m": 10.0,
+            "static_mixing_coeff": 0.0,
+            "charge_mixing_coeff": 0.0,
+            "discharge_mixing_coeff": 0.0,
+        },
         "Good": {
             "height_m": 10.0,
             "static_mixing_coeff": 0.005,
@@ -205,6 +217,8 @@ def build_quadmesh_heatmap(df: pd.DataFrame, value_column: str, title: str, cmap
         tools=["hover"],
         show_grid=True,
         shared_axes=False,
+        axiswise=True,
+        framewise=True,
         height=PLOT_HEIGHT,
         width=720,
     )
@@ -222,7 +236,11 @@ def build_quadmesh_heatmap(df: pd.DataFrame, value_column: str, title: str, cmap
         alpha=0.9,
         tools=["hover"],
     )
-    return heatmap * contour_underlay * contours
+    return (heatmap * contour_underlay * contours).opts(
+        shared_axes=False,
+        axiswise=True,
+        framewise=True,
+    )
 
 
 def scenario_monthly_summary(hourly_df: pd.DataFrame) -> pd.DataFrame:
@@ -241,6 +259,7 @@ def scenario_monthly_summary(hourly_df: pd.DataFrame) -> pd.DataFrame:
             collector_efficiency_pct=("collector_efficiency", lambda values: 100.0 * values.mean()),
             tank_charge_kwh=("tank_charge_kwh", "sum"),
             tank_loss_kwh=("tank_loss_kwh", "sum"),
+            solar_curtailed_kwh=("solar_energy_curtailed_kwh", "sum"),
         )
     )
     monthly_df["solar_heat_ratio_pct"] = np.where(
@@ -260,6 +279,7 @@ def scenario_monthly_summary(hourly_df: pd.DataFrame) -> pd.DataFrame:
                 "collector_efficiency_pct": 100.0 * working["collector_efficiency"].mean(),
                 "tank_charge_kwh": monthly_df["tank_charge_kwh"].sum(),
                 "tank_loss_kwh": monthly_df["tank_loss_kwh"].sum(),
+                "solar_curtailed_kwh": monthly_df["solar_curtailed_kwh"].sum(),
                 "solar_heat_ratio_pct": (
                     100.0 * monthly_df["solar_heating_energy_kwh"].sum() / monthly_df["total_heating_load_kwh"].sum()
                     if monthly_df["total_heating_load_kwh"].sum() > 0
@@ -310,12 +330,15 @@ def line_plot_ylim(df: pd.DataFrame, columns: str | list[str]) -> tuple[float, f
     if finite_values.size == 0:
         return (0.0, None)
     min_value = float(finite_values.min())
-    if min_value >= 0:
-        return (0.0, None)
     max_value = float(finite_values.max())
     value_range = max_value - min_value
-    pad = max(0.05 * value_range, 0.02 * abs(min_value), 1e-6)
-    return (min_value - pad, None)
+    if min_value >= 0:
+        ymin = 0.0
+    else:
+        ymin_pad = max(0.05 * value_range, 0.02 * abs(min_value), 1e-6)
+        ymin = min_value - ymin_pad
+    ymax_pad = max(0.05 * value_range, 0.02 * max(abs(max_value), 1.0), 1e-6)
+    return (ymin, max_value + ymax_pad)
 
 
 def table_height_for_rows(row_count: int, min_height: int = 120, max_height: int = 1400) -> int:
@@ -431,21 +454,21 @@ def build_dashboard():
         "heating_supply_temp": 45.0,
         "heating_delta_t": 10.0,
         "solar_collector_delta_t": 10.0,
-        "direct_solar_delivery_margin_c": 2.0,
+        "direct_solar_delivery_margin_c": 0.0,
         "short_term_loss": 1.0,
         "seasonal_loss": 0.15,
         "short_term_ratio": 200.0,
         "seasonal_ratio": 2000.0,
-        "short_term_tank_height_m": 2.4,
-        "seasonal_tank_height_m": 7.5,
-        "short_term_static_mixing_coeff": 0.020,
-        "seasonal_static_mixing_coeff": 0.010,
-        "short_term_charge_mixing_coeff": 0.080,
-        "seasonal_charge_mixing_coeff": 0.045,
-        "short_term_discharge_mixing_coeff": 0.060,
-        "seasonal_discharge_mixing_coeff": 0.035,
-        "short_term_preset": "Average",
-        "seasonal_preset": "Average",
+        "short_term_tank_height_m": 3.5,
+        "seasonal_tank_height_m": 10.0,
+        "short_term_static_mixing_coeff": 0.0,
+        "seasonal_static_mixing_coeff": 0.0,
+        "short_term_charge_mixing_coeff": 0.0,
+        "seasonal_charge_mixing_coeff": 0.0,
+        "short_term_discharge_mixing_coeff": 0.0,
+        "seasonal_discharge_mixing_coeff": 0.0,
+        "short_term_preset": "Ideal",
+        "seasonal_preset": "Ideal",
         "collector_cost_per_m2": 300.0,
         "project_lifetime_years": 20.0,
         "electricity_price": 0.12,
@@ -472,6 +495,8 @@ def build_dashboard():
         "eta0": 0.72,
         "a1": 3.2,
         "a2": 0.0,
+        "collector_soiling_factor": 1.0,
+        "selected_scenarios": "short_term,seasonal_boiler,seasonal_hp",
     }
     default_inputs.update(load_design_inputs_from_excel(design_inputs_path))
 
@@ -501,6 +526,16 @@ def build_dashboard():
             "ratio_value": lambda: seasonal_ratio.value,
         },
     }
+    scenario_options = {
+        definition["tab_title"]: key for key, definition in scenario_defs.items()
+    }
+    default_selected_scenarios = [
+        item.strip()
+        for item in str(default_inputs.get("selected_scenarios", "short_term,seasonal_boiler,seasonal_hp")).split(",")
+        if item.strip() in scenario_defs
+    ]
+    if not default_selected_scenarios:
+        default_selected_scenarios = list(scenario_defs.keys())
 
     project_name = pn.widgets.TextInput(
         name="Project Name",
@@ -512,10 +547,17 @@ def build_dashboard():
     )
     hourly_file = pn.widgets.FileInput(name="Upload Hourly Input File", accept=".csv,.xlsx,.xls")
     update_hourly_button = pn.widgets.Button(name="Update Hourly Input File", button_type="warning", width=BUTTON_WIDTH)
+    clear_results_button = pn.widgets.Button(name="Clear Current Results", button_type="light", width=BUTTON_WIDTH)
     analyze_button = pn.widgets.Button(name="Analyze Input Data", button_type="default", width=BUTTON_WIDTH)
     run_two_step_button = pn.widgets.Button(name="Run Two-Step Analysis", button_type="primary", width=BUTTON_WIDTH)
     run_cost_button = pn.widgets.Button(name="Run Cost Optimization Analysis", button_type="primary", width=BUTTON_WIDTH)
     run_combined_button = pn.widgets.Button(name="Run Cost + Two-Step Analysis", button_type="success", width=BUTTON_WIDTH)
+    selected_scenarios = pn.widgets.MultiChoice(
+        name="Scenarios To Analyze",
+        options=scenario_options,
+        value=default_selected_scenarios,
+        solid=False,
+    )
     overall_status = pn.pane.Markdown("Ready.")
     hourly_upload_status = pn.pane.Markdown("")
 
@@ -581,10 +623,13 @@ def build_dashboard():
     eta0 = pn.widgets.FloatInput(name="Collector eta0", value=float(default_inputs["eta0"]), step=0.01)
     a1 = pn.widgets.FloatInput(name="Collector a1", value=float(default_inputs["a1"]), step=0.1)
     a2 = pn.widgets.FloatInput(name="Collector a2", value=float(default_inputs["a2"]), step=0.001)
+    collector_soiling_factor = pn.widgets.FloatInput(name="Collector Soiling Factor", value=float(default_inputs["collector_soiling_factor"]), step=0.01, start=0.0, end=1.0)
 
     input_analysis = pn.pane.Markdown("")
     monthly_table = make_data_table(default_rows=12, min_height=260, max_height=900)
     duration_plot = plot_container(PLOT_HEIGHT)
+    input_heating_load_plot = plot_container(PLOT_HEIGHT)
+    input_oat_plot = plot_container(PLOT_HEIGHT)
 
     state = {
         "weather_df": None,
@@ -619,6 +664,7 @@ def build_dashboard():
             "eta0": eta0.value,
             "a1": a1.value,
             "a2": a2.value,
+            "collector_soiling_factor": collector_soiling_factor.value,
             "collector_cost_per_m2": collector_cost_per_m2.value,
             "short_term_cost_coeff": short_term_cost_coeff.value,
             "short_term_cost_exponent": short_term_cost_exponent.value,
@@ -648,6 +694,7 @@ def build_dashboard():
             "eta0": eta0.value,
             "a1": a1.value,
             "a2": a2.value,
+            "collector_soiling_factor": collector_soiling_factor.value,
             "collector_cost_per_m2": collector_cost_per_m2.value,
             "short_term_cost_coeff": short_term_cost_coeff.value,
             "short_term_cost_exponent": short_term_cost_exponent.value,
@@ -715,7 +762,9 @@ def build_dashboard():
             target_path = selected_hourly_input_path()
             target_path.parent.mkdir(parents=True, exist_ok=True)
             target_path.write_bytes(hourly_file.value)
+            reset_results_state()
             hourly_upload_status.object = f"Hourly input file updated: `{display_hourly_input_path(target_path)}`"
+            overall_status.object = "Hourly input file updated. Previous analysis results were cleared."
         except Exception as exc:
             hourly_upload_status.object = f"Hourly file update failed: `{exc}`"
 
@@ -770,6 +819,8 @@ def build_dashboard():
             "eta0": eta0.value,
             "a1": a1.value,
             "a2": a2.value,
+            "collector_soiling_factor": collector_soiling_factor.value,
+            "selected_scenarios": ",".join(selected_scenarios.value),
         }
 
     def persist_design_inputs() -> None:
@@ -778,6 +829,7 @@ def build_dashboard():
     def set_running_state(is_running: bool) -> None:
         state["is_running"] = is_running
         update_hourly_button.disabled = is_running
+        clear_results_button.disabled = is_running
         analyze_button.disabled = is_running
         run_two_step_button.disabled = is_running
         run_cost_button.disabled = is_running
@@ -786,6 +838,58 @@ def build_dashboard():
             scenario_state["run_final_button"].disabled = is_running
             scenario_state["export_button"].disabled = is_running or scenario_state["selected_summary"] is None
             scenario_state["html_button"].disabled = is_running or scenario_state["selected_summary"] is None
+
+    def reset_results_state() -> None:
+        state["weather_df"] = None
+        state["input_summary"] = None
+        state["input_monthly_df"] = None
+        state["input_duration_df"] = None
+
+        input_analysis.object = ""
+        set_table_data(monthly_table, pd.DataFrame(), min_height=260, max_height=900)
+        set_plot(duration_plot)
+        set_plot(input_heating_load_plot)
+        set_plot(input_oat_plot)
+
+        for scenario_state in state["scenarios"].values():
+            scenario_state["design_grid_df"] = None
+            scenario_state["collector_df"] = None
+            scenario_state["tank_df"] = None
+            scenario_state["selected_summary"] = None
+            scenario_state["selected_hourly_df"] = None
+            scenario_state["tank_values"] = []
+            scenario_state["status"].object = "Run the study to populate this tab."
+            scenario_state["metrics"].object = ""
+            scenario_state["export_status"].object = ""
+            scenario_state["selected_area"].options = []
+            scenario_state["selected_area"].value = None
+            scenario_state["final_area"].value = 0.0
+            scenario_state["final_tank"].value = 0.0
+            set_table_data(scenario_state["best_table"], pd.DataFrame(), min_height=140, max_height=320)
+            set_table_data(scenario_state["summary_table"], pd.DataFrame(), min_height=280, max_height=1400)
+            set_table_data(scenario_state["monthly_table"], pd.DataFrame(), min_height=320, max_height=900)
+            set_plot(scenario_state["collector_plot"])
+            set_plot(scenario_state["collector_eff_plot"])
+            set_plot(scenario_state["tank_plot"])
+            set_plot(scenario_state["tank_eff_plot"])
+            set_plot(scenario_state["cost_heatmap"])
+            set_plot(scenario_state["ratio_heatmap"])
+            set_plot(scenario_state["tank_temp_plot"])
+            set_plot(scenario_state["heating_plot"])
+            set_plot(scenario_state["tank_flow_plot"])
+            set_plot(scenario_state["weather_temp_plot"])
+            set_plot(scenario_state["weather_load_plot"])
+            set_plot(scenario_state["weather_solar_plot"])
+            scenario_state["export_button"].disabled = True
+            scenario_state["html_button"].disabled = True
+
+    def clear_current_results(_event=None) -> None:
+        reset_results_state()
+        overall_status.object = "Current analysis results were cleared."
+
+    def selected_scenario_keys() -> list[str]:
+        keys = [key for key in selected_scenarios.value if key in scenario_defs]
+        return keys if keys else list(scenario_defs.keys())
 
     def update_sizing_mode(*_events) -> None:
         auto_visible = sizing_mode.value == "Auto Generate"
@@ -842,6 +946,7 @@ def build_dashboard():
                 eta0=eta0.value,
                 a1=a1.value,
                 a2=a2.value,
+                collector_soiling_factor=collector_soiling_factor.value,
             )
             state["weather_df"] = weather_df
             state["input_summary"] = summary
@@ -877,6 +982,34 @@ def build_dashboard():
                 ylabel="Value",
                 ylim=line_plot_ylim(duration_plot_df, ["Load", "Surface Solar", "Horizontal Solar"]),
                 legend="top",
+                height=PLOT_HEIGHT,
+                grid=True,
+                shared_axes=False,
+            ))
+            input_timeseries_df = weather_df.rename(
+                columns={
+                    "heating_load": "Load",
+                    "outside_temp": "Outside",
+                }
+            )
+            set_plot(input_heating_load_plot, input_timeseries_df.hvplot.line(
+                x="timestamp",
+                y="Load",
+                title="Hourly Heating Load",
+                ylabel="Heating Load (kWh)",
+                ylim=line_plot_ylim(input_timeseries_df, "Load"),
+                legend=False,
+                height=PLOT_HEIGHT,
+                grid=True,
+                shared_axes=False,
+            ))
+            set_plot(input_oat_plot, input_timeseries_df.hvplot.line(
+                x="timestamp",
+                y="Outside",
+                title="Hourly Outdoor Air Temperature",
+                ylabel="Temperature (C)",
+                ylim=line_plot_ylim(input_timeseries_df, "Outside"),
+                legend=False,
                 height=PLOT_HEIGHT,
                 grid=True,
                 shared_axes=False,
@@ -1029,7 +1162,14 @@ def build_dashboard():
         weather_df = state["weather_df"]
         scenario_state = state["scenarios"][scenario_key]
         definition = scenario_defs[scenario_key]
-        if weather_df is None or scenario_state["final_area"].value is None or scenario_state["final_tank"].value is None:
+        if weather_df is None:
+            scenario_state["export_status"].object = "Run `Analyze Input Data` or a study first so the hourly input is loaded."
+            return
+        if scenario_state["final_area"].value is None or scenario_state["final_tank"].value is None:
+            scenario_state["export_status"].object = "Enter both collector area and tank size before running Step 3."
+            return
+        if scenario_state["final_area"].value <= 0 or scenario_state["final_tank"].value <= 0:
+            scenario_state["export_status"].object = "Collector area and tank size must both be greater than zero for Step 3."
             return
 
         summary, hourly_df = simulate_design(
@@ -1201,6 +1341,11 @@ def build_dashboard():
             if summary["solar_energy_collected_kwh"] > 0
             else 0.0
         )
+        curtailed_solar_pct = (
+            100.0 * summary["solar_energy_curtailed_kwh"] / summary["solar_energy_collected_kwh"]
+            if summary["solar_energy_collected_kwh"] > 0
+            else 0.0
+        )
         scenario_state["metrics"].object = (
             "### Final Selected Result\n"
             "#### Selected Size\n"
@@ -1217,6 +1362,7 @@ def build_dashboard():
             f"- Solar direct heat energy: `{solar_direct_heat_kwh:.1f} kWh`\n"
             f"- Solar energy by using heat pump: `{summary['solar_from_tank_via_hp_kwh']:.1f} kWh`\n"
             f"- Usable solar heat energy: `{summary['solar_source_energy_used_kwh']:.1f} kWh`\n"
+            f"- Solar curtailed energy: `{summary['solar_energy_curtailed_kwh']:.1f} kWh`\n"
             f"- Solar heating delivered: `{summary['solar_energy_for_heating_kwh']:.1f} kWh`\n"
             f"- Solar energy use ratio: `{solar_energy_use_ratio_pct:.2f}%`\n"
             f"- Solar heating ratio: `{summary['solar_coverage_pct']:.2f}%`\n"
@@ -1226,6 +1372,7 @@ def build_dashboard():
             f"- Auxiliary energy input: `{summary['auxiliary_energy_input_kwh']:.1f} kWh`\n"
             f"- Annual energy cost: `RMB {summary['annual_auxiliary_energy_cost']:.2f}`\n"
             f"- Heat loss percentage: `{heat_loss_pct:.2f}%`\n"
+            f"- Solar curtailment percentage: `{curtailed_solar_pct:.2f}%`\n"
             f"- Heat pump power input: `{summary['auxiliary_energy_for_hp_boost_kwh']:.1f} kWh`\n"
             f"- Annualized total cost: `RMB {summary['annualized_total_cost']:.2f}`\n"
             f"- Tank final temperature: `{summary['tank_final_temp_c']:.1f} C`"
@@ -1556,16 +1703,21 @@ def build_dashboard():
             }.items():
                 if not 0.0 <= value <= 0.45:
                     raise ValueError(f"{label} must be between 0.0 and 0.45.")
+            if not 0.0 <= collector_soiling_factor.value <= 1.0:
+                raise ValueError("Collector soiling factor must be between 0.0 and 1.0.")
             if state["weather_df"] is None:
                 analyze_inputs()
-            for scenario_key in scenario_defs:
+            scenario_keys = selected_scenario_keys()
+            for scenario_key in scenario_keys:
                 run_scenario_study(scenario_key, mode=mode)
             mode_label = {
                 "two_step": "Two-step analysis",
                 "cost": "Cost optimization analysis",
                 "combined": "Cost + two-step analysis",
             }[mode]
-            overall_status.object = f"{mode_label} completed: `100%`"
+            overall_status.object = (
+                f"{mode_label} completed for `{', '.join(scenario_defs[key]['tab_title'] for key in scenario_keys)}`: `100%`"
+            )
         except Exception as exc:
             overall_status.object = f"### Error\n`{exc}`"
         finally:
@@ -1578,6 +1730,7 @@ def build_dashboard():
         scenario_state["html_button"].on_click(lambda _event, key=scenario_key: on_html_click(key))
 
     update_hourly_button.on_click(update_hourly_file)
+    clear_results_button.on_click(clear_current_results)
     analyze_button.on_click(analyze_inputs)
     run_two_step_button.on_click(lambda _event: run_analysis("two_step"))
     run_cost_button.on_click(lambda _event: run_analysis("cost"))
@@ -1597,7 +1750,9 @@ def build_dashboard():
         pn.pane.Markdown("## Study Control"),
         path_input,
         hourly_file,
+        selected_scenarios,
         update_hourly_button,
+        clear_results_button,
         hourly_upload_status,
         analyze_button,
         run_two_step_button,
@@ -1665,13 +1820,14 @@ def build_dashboard():
         sizing_file,
         sizing_help,
         pn.pane.Markdown("### Collector Model"),
-        pn.Row(collector_type, eta0, a1, a2),
+        pn.Row(collector_type, eta0, a1, a2, collector_soiling_factor),
         sizing_mode="stretch_width",
     )
 
     input_results_tab = pn.Column(
         pn.pane.Markdown("## Input Analysis Results"),
         input_analysis,
+        pn.Row(input_heating_load_plot, input_oat_plot, sizing_mode="stretch_width"),
         duration_plot,
         monthly_table,
         sizing_mode="stretch_width",
