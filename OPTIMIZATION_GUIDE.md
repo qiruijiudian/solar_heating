@@ -7,10 +7,10 @@ This document explains how the solar heating system is optimized in this project
 The project sizes a solar heating system with thermal storage using hourly input data. It compares three fixed system cases:
 
 - Short-term storage
-- Long-term storage with electric boiler
+- Long-term storage with electric boilers
 - Long-term storage with heat pump
 
-For each case, the tool evaluates solar collector area and tank size, calculates energy flows hour by hour, and recommends designs based on annualized cost.
+For each case, the tool evaluates solar collector area and tank size, calculates energy flows hour by hour, and recommends designs based on annualized cost in `RMB`.
 
 ## Main Files
 
@@ -26,6 +26,10 @@ For each case, the tool evaluates solar collector area and tank size, calculates
 The default hourly input file is:
 
 - `01 input files/weather and heating load data.xlsx`
+
+Saved GUI defaults are stored in:
+
+- `design_inputs.xlsx`
 
 Expected columns:
 
@@ -55,7 +59,7 @@ Solar heating ratio is calculated as:
 
 `(direct solar heating + tank discharge for heating) / heating load`
 
-### 2. Long-Term Storage with Electric Boiler
+### 2. Long-Term Storage with Electric Boilers
 
 Used to study seasonal storage with electric auxiliary heating.
 
@@ -114,13 +118,19 @@ Long-term tanks repeat the same year until:
 
 ## Optimization Workflow in the GUI
 
-The GUI has a left control panel and several main tabs.
+The GUI has a left control panel and five main tabs:
+
+- `Design Inputs`
+- `Input Analysis Results`
+- `Short-Term Storage`
+- `Long-Term Storage With Electric Boilers`
+- `Long-Term Storage With Heat Pump`
 
 ### Step A. Analyze the Input Data
 
 Use `Analyze Input Data` first.
 
-This creates the `Input Analysis` tab and shows:
+This fills the `Input Analysis Results` tab and shows:
 
 - annual heating load
 - heating-season load
@@ -129,6 +139,10 @@ This creates the `Input Analysis` tab and shows:
 - monthly summary table
 - hourly duration curves
 - suggested collector-area and tank-size ranges
+
+The current design inputs are also saved automatically to:
+
+- `design_inputs.xlsx`
 
 ### How the suggested ranges are calculated
 
@@ -170,15 +184,27 @@ Suggested tank size is then estimated using:
 
 These suggestions are screening values only. They help choose candidate ranges for the full simulation. They are not the final optimized design.
 
-### Step B. Run the Full Study
+### Step B. Run the Studies
 
-Use `Run Study`.
+Use one of the three sidebar buttons:
 
-For each of the three cases, the tool performs:
+- `Run Two-Step Analysis`
+- `Run Cost Optimization Analysis`
+- `Run Cost + Two-Step Analysis`
 
-1. Full cost optimization grid
-2. Step 1 study: solar heating ratio vs collector area
-3. Step 2 study: solar heating ratio vs tank size at a selected collector area
+For each of the three fixed cases, the tool performs:
+
+1. cost optimization grid, if selected
+2. Step 1 collector-area study
+3. Step 2 tank-size study at a selected collector area
+
+During the run, the status panel reports:
+
+- active scenario
+- active process
+- percent complete
+- current collector area
+- current tank volume
 
 ### Step C. Review the Result Tab for Each Case
 
@@ -187,10 +213,13 @@ Each case tab shows:
 - cost optimization result table
 - cost heatmap
 - solar heating ratio heatmap
-- solar heating ratio vs collector area
-- solar heating ratio vs tank size
-- final decision calculation section
-- time-series plots
+- Step 1: solar heat ratio vs collector area
+- Step 1: collector efficiency vs collector area
+- Step 2: solar heat ratio vs tank size
+- Step 2: collector efficiency vs tank size
+- Step 3 final selected result section
+- Step 3 time-series plots
+- monthly summary table
 - full design table
 
 ### Step D. Run the Final Decision Case
@@ -203,14 +232,17 @@ After reviewing Step 1 and Step 2:
 
 This runs the final hourly simulation for the selected design and updates:
 
+- final selected result summary
 - tank temperature plot
 - heating source plot
 - tank charge/discharge plot
-- summary metrics
+- weather and load plot
+- monthly summary table
+- full design table
 
 ## What the Tool Optimizes
 
-The optimization objective is annualized total cost.
+The optimization objective is annualized total cost in `RMB`.
 
 For each candidate design:
 
@@ -282,7 +314,7 @@ reported as a percentage.
 
 ### Auxiliary Heating Delivered
 
-Heating still supplied by electric boiler or other auxiliary system after solar and tank contributions.
+Heating still supplied by the electric boiler, heat pump, or other auxiliary system after solar and tank contributions.
 
 ### Auxiliary Energy Input
 
@@ -294,7 +326,7 @@ Actual electricity or fuel-equivalent energy used by the auxiliary system.
 
 - X-axis: collector area
 - Y-axis: tank size
-- color: annualized total cost
+- color: annualized total cost in `RMB`
 - contour lines: equal-cost lines
 
 Use this plot to identify low-cost design regions.
@@ -312,13 +344,23 @@ Use this plot to see how solar contribution changes with sizing.
 
 This is a screening plot for Step 1.
 
-It shows whether increasing collector area still gives meaningful gain.
+The current GUI shows two Step 1 plots side by side:
+
+- solar heat ratio vs collector area
+- collector efficiency vs collector area
+
+These plots show whether increasing collector area still gives meaningful gain and how collector operating efficiency changes across the range.
 
 ### Solar Heating Ratio vs Tank Size
 
 This is Step 2.
 
-It shows how much storage size still improves solar contribution at a fixed collector area.
+The current GUI shows two Step 2 plots side by side:
+
+- solar heat ratio vs tank size
+- collector efficiency vs tank size
+
+These plots show how much storage size still improves solar contribution at the selected collector area and how the collector operating efficiency responds to tank size.
 
 ### Tank Temperature Plot
 
@@ -366,12 +408,34 @@ Each workbook includes:
 1. Check the hourly input file
 2. Run `Analyze Input Data`
 3. Use the suggested ranges to set candidate collector and tank ranges
-4. Run `Run Study`
+4. Choose one of:
+   `Run Two-Step Analysis`, `Run Cost Optimization Analysis`, or `Run Cost + Two-Step Analysis`
 5. Review cost heatmap and solar heating ratio heatmap
 6. Use Step 1 to choose a collector area
 7. Use Step 2 to choose a tank size
-8. Run `Step 3 Final Results`
+8. Run `Run Step 3 Final Results`
 9. Export the Excel report
+
+## Monthly Summary Table
+
+Each case tab includes a monthly summary table below Step 3.
+
+The current table includes:
+
+- `Month`
+- `Total Heating Load`
+- `Average Heating Load`
+- `Usable Solar Heat`
+- `Solar Heating Energy`
+- `Auxiliary Energy`
+- `Collector Efficiency`
+- `Tank Charge`
+- `Tank Loss`
+- `Solar Heat Ratio`
+
+The last row is:
+
+- `Annual Summary`
 
 ## Current Model Limits
 

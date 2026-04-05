@@ -478,7 +478,9 @@ def _simulate_single_pass(
     for row in weather_load_df.itertuples(index=False):
         tank_temp_start, tank_top_temp_start, tank_bottom_temp_start = tank_summary_temperatures(working_layers)
         storage_energy_start_kwh = tank_energy_from_layers(working_layers, tank_min_temp, kwh_per_k_per_node)
-        collector_fluid_temp = max(heating_supply_temp, tank_top_temp_start) + solar_collector_delta_t / 2.0
+        # Use the mean tank temperature as the charging reference so the collector
+        # is not forced to operate against the hottest top layer every hour.
+        collector_fluid_temp = max(heating_supply_temp, tank_temp_start) + solar_collector_delta_t / 2.0
         solar_collected_kwh, efficiency = collector_output_kwh(
             area_m2=collector_area_m2,
             solar_rad_kwh_m2=row.solar_rad,
@@ -599,6 +601,7 @@ def _simulate_single_pass(
                 "solar_from_tank_direct_kwh": solar_from_tank_direct_kwh,
                 "solar_from_tank_via_hp_kwh": solar_from_tank_via_hp_kwh,
                 "solar_from_tank_via_hp_source_kwh": solar_from_tank_via_hp_source_kwh,
+                "solar_source_energy_used_kwh": solar_source_energy_used_kwh,
                 "solar_heating_total_kwh": solar_heating_delivered_kwh,
                 "auxiliary_heating_delivered_kwh": auxiliary_heating_delivered_kwh,
                 "auxiliary_energy_input_kwh": auxiliary_energy_input_kwh,
@@ -735,6 +738,12 @@ def simulate_design(
     annual_auxiliary_energy_cost = totals["auxiliary_energy_input_kwh"] * electricity_price
     annualized_total_cost = annualized_capital + annual_auxiliary_energy_cost
 
+    productive_efficiency_pct = 0.0
+    if not records_df.empty:
+        productive_records = records_df[records_df["solar_energy_collected_kwh"] > 0]
+        source_df = productive_records if not productive_records.empty else records_df
+        productive_efficiency_pct = 100.0 * float(source_df["collector_efficiency"].mean())
+
     results = {
         "tank_type": tank_type,
         "tank_type_label": tank_type_label(tank_type),
@@ -753,6 +762,7 @@ def simulate_design(
         "annualized_capital_cost": annualized_capital,
         "annual_auxiliary_energy_cost": annual_auxiliary_energy_cost,
         "annualized_total_cost": annualized_total_cost,
+        "collector_efficiency_pct": productive_efficiency_pct,
         **totals,
     }
     load_total = results["heating_load_kwh"]
@@ -1022,3 +1032,166 @@ def best_design(summary_df: pd.DataFrame, objective: str = "cost") -> pd.Series:
         sort_columns = ["auxiliary_heating_delivered_kwh", "solar_coverage_pct", "collector_area_m2", "tank_volume_m3"]
         ascending = [True, False, True, True]
     return summary_df.sort_values(by=sort_columns, ascending=ascending).iloc[0]
+
+
+def estimate_reference_collector_efficiency(
+    weather_load_df: pd.DataFrame,
+    heating_supply_temp: float,
+    solar_collector_delta_t: float,
+    eta0: float,
+    a1: float,
+    a2: float,
+    timestep_hours: float = 1.0,
+) -> float:
+    positive_radiation = weather_load_df[weather_load_df["solar_rad"] > 0].copy()
+    if positive_radiation.empty:
+        return max(min(eta0, 0.85), 0.1)
+
+    fluid_temp_c = heating_supply_temp + solar_collector_delta_t / 2.0
+    efficiencies = []
+    for row in positive_radiation.itertuples(index=False):
+        _, efficiency = collector_output_kwh(
+            area_m2=1.0,
+            solar_rad_kwh_m2=row.solar_rad,
+            outside_temp_c=row.outside_temp,
+            fluid_temp_c=fluid_temp_c,
+            timestep_hours=timestep_hours,
+            eta0=eta0,
+            a1=a1,
+            a2=a2,
+        )
+        efficiencies.append(efficiency)
+    return float(np.clip(np.mean(efficiencies), 0.1, 0.85))
+
+
+def analyze_input_data(
+    weather_load_df: pd.DataFrame,
+    heating_supply_temp: float = 45.0,
+    solar_collector_delta_t: float = 10.0,
+    eta0: float = 0.72,
+    a1: float = 3.2,
+    a2: float = 0.0,
+    timestep_hours: float = 1.0,
+) -> tuple[dict[str, float], pd.DataFrame, pd.DataFrame]:
+    df = weather_load_df.copy()
+    df["month"] = df["timestamp"].dt.to_period("M").astype(str)
+    heating_hours = df["heating_load"] > 0
+
+    annual_heating_load_kwh = float(df["heating_load"].sum())
+    heating_season_load_kwh = float(df.loc[heating_hours, "heating_load"].sum())
+    annual_tilted_solar_kwh_m2 = float(df["solar_rad"].sum())
+    annual_horizontal_solar_kwh_m2 = float(df.get("horizontal_solar_rad", pd.Series(dtype=float)).fillna(0.0).sum())
+    heating_season_tilted_solar_kwh_m2 = float(df.loc[heating_hours, "solar_rad"].sum())
+
+    reference_efficiency = estimate_reference_collector_efficiency(
+        weather_load_df=df,
+        heating_supply_temp=heating_supply_temp,
+        solar_collector_delta_t=solar_collector_delta_t,
+        eta0=eta0,
+        a1=a1,
+        a2=a2,
+        timestep_hours=timestep_hours,
+    )
+
+    monthly_df = (
+        df.groupby("month", as_index=False)
+        .agg(
+            heating_load_kwh=("heating_load", "sum"),
+            solar_rad_kwh_m2=("solar_rad", "sum"),
+            horizontal_solar_rad_kwh_m2=("horizontal_solar_rad", "sum") if "horizontal_solar_rad" in df else ("solar_rad", "size"),
+            mean_outside_temp_c=("outside_temp", "mean"),
+        )
+    )
+    if "horizontal_solar_rad" not in df:
+        monthly_df["horizontal_solar_rad_kwh_m2"] = np.nan
+
+    short_area_min = heating_season_load_kwh / max(annual_scale(heating_season_tilted_solar_kwh_m2, reference_efficiency, 0.90), 1e-9)
+    short_area_max = heating_season_load_kwh / max(annual_scale(heating_season_tilted_solar_kwh_m2, reference_efficiency, 0.70), 1e-9)
+    long_area_min = annual_heating_load_kwh / max(annual_scale(annual_tilted_solar_kwh_m2, reference_efficiency, 1.00), 1e-9)
+    long_area_max = annual_heating_load_kwh / max(annual_scale(annual_tilted_solar_kwh_m2, reference_efficiency, 0.95), 1e-9)
+
+    summary = {
+        "annual_heating_load_kwh": annual_heating_load_kwh,
+        "heating_season_load_kwh": heating_season_load_kwh,
+        "annual_tilted_solar_kwh_m2": annual_tilted_solar_kwh_m2,
+        "annual_horizontal_solar_kwh_m2": annual_horizontal_solar_kwh_m2,
+        "reference_collector_efficiency": reference_efficiency,
+        "short_term_collector_min_m2": round(max(short_area_min, 10.0), 1),
+        "short_term_collector_max_m2": round(max(short_area_max, max(short_area_min, 10.0)), 1),
+        "short_term_tank_min_m3": round(max(short_area_min * 0.01, 1.0), 1),
+        "short_term_tank_max_m3": round(max(short_area_max * 0.30, 5.0), 1),
+        "seasonal_collector_min_m2": round(max(long_area_min, 10.0), 1),
+        "seasonal_collector_max_m2": round(max(long_area_max, max(long_area_min, 10.0)), 1),
+        "seasonal_tank_min_m3": round(max(long_area_min * 0.30, 10.0), 1),
+        "seasonal_tank_max_m3": round(max(long_area_max * 3.00, 30.0), 1),
+    }
+
+    duration_df = pd.DataFrame(
+        {
+            "heating_load_duration_kwh": np.sort(df["heating_load"].to_numpy())[::-1],
+            "tilted_solar_duration_kwh_m2": np.sort(df["solar_rad"].to_numpy())[::-1],
+            "horizontal_solar_duration_kwh_m2": np.sort(df.get("horizontal_solar_rad", pd.Series(np.zeros(len(df)))).to_numpy())[::-1],
+        }
+    )
+    duration_df["hour_rank"] = np.arange(1, len(duration_df) + 1)
+
+    return summary, monthly_df, duration_df
+
+
+def annual_scale(solar_total_kwh_m2: float, reference_efficiency: float, target_ratio: float) -> float:
+    return solar_total_kwh_m2 * max(reference_efficiency, 1e-6) * max(target_ratio, 1e-6)
+
+
+def monthly_performance_from_hourly(hourly_df: pd.DataFrame) -> pd.DataFrame:
+    working = hourly_df.copy()
+    working["month"] = working["timestamp"].dt.to_period("M").astype(str)
+    return (
+        working.groupby("month", as_index=False)
+        .agg(
+            heating_load_kwh=("heating_load_kwh", "sum"),
+            solar_energy_collected_kwh=("solar_energy_collected_kwh", "sum"),
+            solar_source_energy_used_kwh=("solar_source_energy_used_kwh", "sum"),
+            auxiliary_heating_delivered_kwh=("auxiliary_heating_delivered_kwh", "sum"),
+            auxiliary_energy_input_kwh=("auxiliary_energy_input_kwh", "sum"),
+            tank_charge_kwh=("tank_charge_kwh", "sum"),
+            tank_discharge_total_kwh=("tank_discharge_total_kwh", "sum"),
+            tank_loss_kwh=("tank_loss_kwh", "sum"),
+        )
+    )
+
+
+def export_case_report(
+    output_path: str | Path,
+    optimized_df: pd.DataFrame,
+    step1_df: pd.DataFrame,
+    step2_df: pd.DataFrame,
+    final_summary: dict[str, float | str],
+    final_hourly_df: pd.DataFrame,
+    project_inputs: dict[str, float | str] | None = None,
+    monthly_summary_df: pd.DataFrame | None = None,
+    input_monthly_df: pd.DataFrame | None = None,
+) -> Path:
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    project_inputs_df = pd.DataFrame([project_inputs]) if project_inputs else pd.DataFrame()
+    final_summary_df = pd.DataFrame([final_summary])
+    final_monthly_df = (
+        monthly_summary_df.copy()
+        if monthly_summary_df is not None and not monthly_summary_df.empty
+        else (monthly_performance_from_hourly(final_hourly_df) if not final_hourly_df.empty else pd.DataFrame())
+    )
+
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        if not project_inputs_df.empty:
+            project_inputs_df.to_excel(writer, sheet_name="project_inputs", index=False)
+        final_summary_df.to_excel(writer, sheet_name="final_summary", index=False)
+        step1_df.to_excel(writer, sheet_name="step1_results", index=False)
+        step2_df.to_excel(writer, sheet_name="step2_results", index=False)
+        optimized_df.to_excel(writer, sheet_name="optimization_grid", index=False)
+        final_monthly_df.to_excel(writer, sheet_name="monthly_summary", index=False)
+        final_hourly_df.to_excel(writer, sheet_name="hourly_results", index=False)
+        if input_monthly_df is not None and not input_monthly_df.empty:
+            input_monthly_df.to_excel(writer, sheet_name="input_monthly_data", index=False)
+
+    return output_path

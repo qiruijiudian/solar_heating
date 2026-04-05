@@ -105,7 +105,7 @@ def main() -> None:
     print(f"  Auxiliary heating delivered: {best['auxiliary_heating_delivered_kwh']:.2f} kWh")
     print(f"  Auxiliary energy input: {best['auxiliary_energy_input_kwh']:.2f} kWh")
     print(f"  Solar heating ratio: {best['solar_heating_ratio_pct']:.2f}%")
-    print(f"  Annualized total cost: ${best['annualized_total_cost']:.2f}")
+    print(f"  Annualized total cost: RMB {best['annualized_total_cost']:.2f}")
     print(f"  Final tank temperature: {best['tank_final_temp_c']:.2f} C")
 
 
