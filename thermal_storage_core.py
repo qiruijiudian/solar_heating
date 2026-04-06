@@ -597,7 +597,13 @@ def _simulate_single_pass(
             direct_mode_enabled = False
             charge_source_temp = tank_temp_start
         else:
-            collector_inlet_temp = max(tank_temp_start, tank_min_temp)
+            if tank_type == "short_term":
+                collector_inlet_reference_temp = tank_temp_start
+            elif row.heating_load > 0:
+                collector_inlet_reference_temp = max(tank_bottom_temp_start, heating_return_temp)
+            else:
+                collector_inlet_reference_temp = tank_bottom_temp_start
+            collector_inlet_temp = max(collector_inlet_reference_temp, tank_min_temp)
             collector_outlet_temp = min(collector_inlet_temp + solar_collector_delta_t, tank_max_temp)
             collector_mean_fluid_temp = (collector_inlet_temp + collector_outlet_temp) / 2.0
             solar_collected_kwh, efficiency = collector_output_kwh(
@@ -1288,14 +1294,105 @@ def run_tank_size_study(
     return pd.DataFrame(rows).sort_values(["tank_type", "tank_volume_m3"]).reset_index(drop=True)
 
 
-def best_design(summary_df: pd.DataFrame, objective: str = "cost") -> pd.Series:
+def objective_sort_config(objective: str = "cost") -> tuple[list[str], list[bool], str]:
     if objective == "cost":
-        sort_columns = ["annualized_total_cost", "solar_coverage_pct", "collector_area_m2", "tank_volume_m3"]
-        ascending = [True, False, True, True]
-    else:
-        sort_columns = ["auxiliary_heating_delivered_kwh", "solar_coverage_pct", "collector_area_m2", "tank_volume_m3"]
-        ascending = [True, False, True, True]
-    return summary_df.sort_values(by=sort_columns, ascending=ascending).iloc[0]
+        return ["annualized_total_cost", "solar_coverage_pct", "collector_area_m2", "tank_volume_m3"], [True, False, True, True], "annualized_total_cost"
+    return ["auxiliary_heating_delivered_kwh", "solar_coverage_pct", "collector_area_m2", "tank_volume_m3"], [True, False, True, True], "auxiliary_heating_delivered_kwh"
+
+
+def feasible_designs(summary_df: pd.DataFrame, min_solar_coverage_pct: float = 0.0) -> pd.DataFrame:
+    if summary_df.empty:
+        return summary_df
+    if min_solar_coverage_pct <= 0:
+        return summary_df.copy()
+    feasible = summary_df[summary_df["solar_coverage_pct"] >= float(min_solar_coverage_pct)].copy()
+    return feasible if not feasible.empty else summary_df.copy()
+
+
+def near_optimal_designs(
+    summary_df: pd.DataFrame,
+    objective: str = "cost",
+    cost_tolerance_pct: float = 0.0,
+    min_solar_coverage_pct: float = 0.0,
+) -> pd.DataFrame:
+    candidates = feasible_designs(summary_df, min_solar_coverage_pct=min_solar_coverage_pct)
+    if candidates.empty:
+        return candidates
+    sort_columns, ascending, primary_metric = objective_sort_config(objective)
+    ordered = candidates.sort_values(by=sort_columns, ascending=ascending).reset_index(drop=True)
+    tolerance_pct = max(float(cost_tolerance_pct), 0.0)
+    if tolerance_pct <= 0:
+        return ordered
+    best_metric = float(ordered[primary_metric].iloc[0])
+    metric_limit = best_metric * (1.0 + tolerance_pct / 100.0)
+    near_optimal = ordered[ordered[primary_metric] <= metric_limit].copy()
+    return near_optimal if not near_optimal.empty else ordered
+
+
+def refined_candidate_values(values: list[float], center_value: float, refine_span_pct: float = 35.0) -> list[float]:
+    sorted_values = sorted(set(float(value) for value in values))
+    if len(sorted_values) <= 1:
+        return sorted_values
+    lower_bound = sorted_values[0]
+    upper_bound = sorted_values[-1]
+    span = upper_bound - lower_bound
+    if span <= 0:
+        return sorted_values
+
+    center = float(np.clip(center_value, lower_bound, upper_bound))
+    half_span = max(span * max(refine_span_pct, 1.0) / 200.0, span / max(2 * (len(sorted_values) - 1), 1))
+    refined_low = max(lower_bound, center - half_span)
+    refined_high = min(upper_bound, center + half_span)
+    if refined_high <= refined_low:
+        return sorted_values
+
+    refined = np.linspace(refined_low, refined_high, len(sorted_values))
+    refined_values = sorted({round(float(value), 6) for value in refined})
+    if center not in refined_values:
+        refined_values.append(round(center, 6))
+    if lower_bound <= center <= upper_bound:
+        refined_values.append(round(refined_low, 6))
+        refined_values.append(round(refined_high, 6))
+    return sorted(set(refined_values))
+
+
+def merge_study_results(df: pd.DataFrame | None, refined_df: pd.DataFrame | None, sort_columns: list[str]) -> pd.DataFrame:
+    frames = [frame for frame in [df, refined_df] if frame is not None and not frame.empty]
+    if not frames:
+        return pd.DataFrame()
+    merged = pd.concat(frames, ignore_index=True)
+    key_columns = [column for column in ["tank_type", "collector_area_m2", "tank_volume_m3"] if column in merged.columns]
+    if key_columns:
+        merged = merged.drop_duplicates(subset=key_columns, keep="last")
+    return merged.sort_values(sort_columns).reset_index(drop=True)
+
+
+def best_design(
+    summary_df: pd.DataFrame,
+    objective: str = "cost",
+    selection_mode: str = "absolute_minimum",
+    cost_tolerance_pct: float = 0.0,
+    min_solar_coverage_pct: float = 0.0,
+) -> pd.Series:
+    candidates = near_optimal_designs(
+        summary_df,
+        objective=objective,
+        cost_tolerance_pct=cost_tolerance_pct,
+        min_solar_coverage_pct=min_solar_coverage_pct,
+    )
+    if candidates.empty:
+        raise ValueError("No design cases are available to select from.")
+
+    sort_columns, ascending, _ = objective_sort_config(objective)
+    ordered = candidates.sort_values(by=sort_columns, ascending=ascending).reset_index(drop=True)
+    if selection_mode != "compact_near_optimal" or len(ordered.index) == 1:
+        return ordered.iloc[0]
+
+    compact = ordered.sort_values(
+        by=["tank_volume_m3", "collector_area_m2", sort_columns[0], "solar_coverage_pct"],
+        ascending=[True, True, True, False],
+    ).reset_index(drop=True)
+    return compact.iloc[0]
 
 
 def estimate_reference_collector_efficiency(
@@ -1431,6 +1528,29 @@ def monthly_performance_from_hourly(hourly_df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def daily_performance_from_hourly(hourly_df: pd.DataFrame) -> pd.DataFrame:
+    working = hourly_df.copy()
+    working["date"] = working["timestamp"].dt.strftime("%Y-%m-%d")
+    return (
+        working.groupby("date", as_index=False)
+        .agg(
+            heating_load_kwh=("heating_load_kwh", "sum"),
+            solar_energy_collected_kwh=("solar_energy_collected_kwh", "sum"),
+            solar_direct_collector_to_load_kwh=("solar_direct_collector_to_load_kwh", "sum"),
+            solar_from_tank_direct_kwh=("solar_from_tank_direct_kwh", "sum"),
+            solar_from_tank_via_hp_kwh=("solar_from_tank_via_hp_kwh", "sum"),
+            solar_heating_total_kwh=("solar_heating_total_kwh", "sum"),
+            auxiliary_heating_delivered_kwh=("auxiliary_heating_delivered_kwh", "sum"),
+            auxiliary_energy_input_kwh=("auxiliary_energy_input_kwh", "sum"),
+            auxiliary_energy_for_hp_boost_kwh=("auxiliary_energy_for_hp_boost_kwh", "sum"),
+            tank_charge_kwh=("tank_charge_kwh", "sum"),
+            tank_discharge_total_kwh=("tank_discharge_total_kwh", "sum"),
+            tank_loss_kwh=("tank_loss_kwh", "sum"),
+            solar_energy_curtailed_kwh=("solar_energy_curtailed_kwh", "sum"),
+        )
+    )
+
+
 def append_annual_summary_row(df: pd.DataFrame, label_column: str = "month", annual_label: str = "Annual Summary") -> pd.DataFrame:
     if df is None or df.empty or label_column not in df.columns:
         return df
@@ -1480,6 +1600,15 @@ def export_case_report(
         else (monthly_performance_from_hourly(final_hourly_export_df) if not final_hourly_export_df.empty else pd.DataFrame())
     )
     final_monthly_df = append_annual_summary_row(final_monthly_df)
+    final_daily_df = (
+        append_annual_summary_row(
+            daily_performance_from_hourly(final_hourly_export_df),
+            label_column="date",
+            annual_label="Annual Summary",
+        )
+        if not final_hourly_export_df.empty
+        else pd.DataFrame()
+    )
     input_monthly_export_df = append_annual_summary_row(input_monthly_df.copy()) if input_monthly_df is not None and not input_monthly_df.empty else input_monthly_df
 
     def format_sheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) -> None:
@@ -1570,6 +1699,9 @@ def export_case_report(
             format_sheet(writer, "optimization_grid", optimized_export_df)
         final_monthly_df.to_excel(writer, sheet_name="monthly_summary", index=False)
         format_sheet(writer, "monthly_summary", final_monthly_df)
+        if not final_daily_df.empty:
+            final_daily_df.to_excel(writer, sheet_name="daily_summary", index=False)
+            format_sheet(writer, "daily_summary", final_daily_df)
         if not final_hourly_export_df.empty:
             final_hourly_export_df.to_excel(writer, sheet_name="hourly_results", index=False)
             format_sheet(writer, "hourly_results", final_hourly_export_df)

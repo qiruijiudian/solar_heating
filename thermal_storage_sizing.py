@@ -9,7 +9,10 @@ from thermal_storage_core import (
     best_design,
     load_input,
     make_candidate_values,
+    merge_study_results,
+    near_optimal_designs,
     parse_numeric_list,
+    refined_candidate_values,
     run_design_grid,
 )
 
@@ -52,6 +55,11 @@ def main() -> None:
     parser.add_argument("--a1", type=float, default=3.2)
     parser.add_argument("--a2", type=float, default=0.0)
     parser.add_argument("--collector-soiling-factor", type=float, default=1.0)
+    parser.add_argument("--selection-mode", default="compact_near_optimal", choices=["absolute_minimum", "compact_near_optimal"])
+    parser.add_argument("--cost-tolerance-pct", type=float, default=3.0)
+    parser.add_argument("--min-solar-coverage-pct", type=float, default=0.0)
+    parser.add_argument("--auto-refine", action="store_true")
+    parser.add_argument("--refine-span-pct", type=float, default=35.0)
     parser.add_argument("--area-list", default="")
     parser.add_argument("--tank-size-list", default="")
     parser.add_argument("--area-min", type=float, default=50.0)
@@ -109,13 +117,79 @@ def main() -> None:
         electricity_price=args.electricity_price,
         project_lifetime_years=args.project_lifetime_years,
     )
+    if args.auto_refine and len(area_values) > 1 and len(tank_values) > 1 and not summary_df.empty:
+        seed = best_design(
+            summary_df,
+            objective="cost",
+            selection_mode=args.selection_mode,
+            cost_tolerance_pct=args.cost_tolerance_pct,
+            min_solar_coverage_pct=args.min_solar_coverage_pct,
+        )
+        refined_summary_df = run_design_grid(
+            weather_load_df=weather_df,
+            collector_area_list=refined_candidate_values(area_values, float(seed["collector_area_m2"]), args.refine_span_pct),
+            tank_size_list=refined_candidate_values(tank_values, float(seed["tank_volume_m3"]), args.refine_span_pct),
+            tank_types=args.tank_types,
+            tank_min_temp=args.tank_min_temp,
+            tank_max_temp=args.tank_max_temp,
+            initial_tank_temp=args.initial_tank_temp,
+            heating_supply_temp=args.heating_supply_temp,
+            heating_delta_t=args.heating_delta_t,
+            solar_collector_delta_t=args.solar_collector_delta_t,
+            direct_solar_delivery_margin_c=args.direct_solar_delivery_margin,
+            short_term_loss_percent_per_day=args.short_term_loss,
+            seasonal_loss_percent_per_day=args.seasonal_loss,
+            short_term_tank_height_m=args.short_term_tank_height,
+            seasonal_tank_height_m=args.seasonal_tank_height,
+            short_term_static_mixing_coeff=args.short_term_static_mixing,
+            seasonal_static_mixing_coeff=args.seasonal_static_mixing,
+            short_term_charge_mixing_coeff=args.short_term_charge_mixing,
+            seasonal_charge_mixing_coeff=args.seasonal_charge_mixing,
+            short_term_discharge_mixing_coeff=args.short_term_discharge_mixing,
+            seasonal_discharge_mixing_coeff=args.seasonal_discharge_mixing,
+            auxiliary_system=args.auxiliary_system,
+            auxiliary_efficiency=args.auxiliary_efficiency,
+            timestep_hours=args.timestep_hours,
+            eta0=args.eta0,
+            a1=args.a1,
+            a2=args.a2,
+            collector_soiling_factor=args.collector_soiling_factor,
+            collector_cost_per_m2=args.collector_cost_per_m2,
+            electricity_price=args.electricity_price,
+            project_lifetime_years=args.project_lifetime_years,
+        )
+        summary_df = merge_study_results(summary_df, refined_summary_df, ["tank_type", "collector_area_m2", "tank_volume_m3"])
 
     if args.show_all:
         print(summary_df.to_string(index=False, float_format=lambda value: f"{value:.3f}"))
         return
 
-    best = best_design(summary_df, objective="cost")
-    print("Best design based on minimum annualized total cost:")
+    strict_min = best_design(
+        summary_df,
+        objective="cost",
+        selection_mode="absolute_minimum",
+        cost_tolerance_pct=0.0,
+        min_solar_coverage_pct=args.min_solar_coverage_pct,
+    )
+    best = best_design(
+        summary_df,
+        objective="cost",
+        selection_mode=args.selection_mode,
+        cost_tolerance_pct=args.cost_tolerance_pct,
+        min_solar_coverage_pct=args.min_solar_coverage_pct,
+    )
+    near_opt = near_optimal_designs(
+        summary_df,
+        objective="cost",
+        cost_tolerance_pct=args.cost_tolerance_pct,
+        min_solar_coverage_pct=args.min_solar_coverage_pct,
+    )
+    print("Strict minimum design:")
+    print(f"  Collector area: {strict_min['collector_area_m2']:.2f} m2")
+    print(f"  Tank size: {strict_min['tank_volume_m3']:.2f} m3")
+    print(f"  Annualized total cost: RMB {strict_min['annualized_total_cost']:.2f}")
+    print(f"Near-optimal candidate count: {len(near_opt.index)}")
+    print(f"Recommended design using `{args.selection_mode}`:")
     print(f"  Tank type: {best['tank_type_label']}")
     print(f"  Collector area: {best['collector_area_m2']:.2f} m2")
     print(f"  Tank size: {best['tank_volume_m3']:.2f} m3")

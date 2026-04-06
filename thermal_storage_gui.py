@@ -28,8 +28,12 @@ from thermal_storage_core import (
     TANK_TYPE_DEFAULTS,
     analyze_input_data,
     best_design,
+    daily_performance_from_hourly,
     export_case_report,
     load_input,
+    merge_study_results,
+    near_optimal_designs,
+    refined_candidate_values,
     run_collector_area_study,
     run_design_grid,
     run_tank_size_study,
@@ -256,11 +260,22 @@ def scenario_monthly_summary(hourly_df: pd.DataFrame) -> pd.DataFrame:
             usable_solar_heat_kwh=("solar_source_energy_used_kwh", "sum"),
             solar_heating_energy_kwh=("solar_heating_total_kwh", "sum"),
             auxiliary_energy_kwh=("auxiliary_energy_input_kwh", "sum"),
+            heat_pump_power_input_kwh=("auxiliary_energy_for_hp_boost_kwh", "sum"),
             collector_efficiency_pct=("collector_efficiency", lambda values: 100.0 * values.mean()),
             tank_charge_kwh=("tank_charge_kwh", "sum"),
             tank_loss_kwh=("tank_loss_kwh", "sum"),
             solar_curtailed_kwh=("solar_energy_curtailed_kwh", "sum"),
         )
+    )
+    productive_working = working[working["solar_energy_collected_kwh"] > 0].copy()
+    if productive_working.empty:
+        productive_efficiency_by_month = pd.Series(dtype=float)
+        annual_productive_efficiency_pct = 0.0
+    else:
+        productive_efficiency_by_month = 100.0 * productive_working.groupby("month")["collector_efficiency"].mean()
+        annual_productive_efficiency_pct = 100.0 * float(productive_working["collector_efficiency"].mean())
+    monthly_df["collector_efficiency_pct"] = (
+        monthly_df["month"].map(productive_efficiency_by_month).fillna(0.0)
     )
     monthly_df["solar_heat_ratio_pct"] = np.where(
         monthly_df["total_heating_load_kwh"] > 0,
@@ -276,7 +291,8 @@ def scenario_monthly_summary(hourly_df: pd.DataFrame) -> pd.DataFrame:
                 "usable_solar_heat_kwh": monthly_df["usable_solar_heat_kwh"].sum(),
                 "solar_heating_energy_kwh": monthly_df["solar_heating_energy_kwh"].sum(),
                 "auxiliary_energy_kwh": monthly_df["auxiliary_energy_kwh"].sum(),
-                "collector_efficiency_pct": 100.0 * working["collector_efficiency"].mean(),
+                "heat_pump_power_input_kwh": monthly_df["heat_pump_power_input_kwh"].sum(),
+                "collector_efficiency_pct": annual_productive_efficiency_pct,
                 "tank_charge_kwh": monthly_df["tank_charge_kwh"].sum(),
                 "tank_loss_kwh": monthly_df["tank_loss_kwh"].sum(),
                 "solar_curtailed_kwh": monthly_df["solar_curtailed_kwh"].sum(),
@@ -496,6 +512,11 @@ def build_dashboard():
         "a1": 3.2,
         "a2": 0.0,
         "collector_soiling_factor": 1.0,
+        "optimization_selection_mode": "compact_near_optimal",
+        "optimization_cost_tolerance_pct": 3.0,
+        "optimization_min_solar_coverage_pct": 0.0,
+        "optimization_auto_refine_search": True,
+        "optimization_refine_span_pct": 35.0,
         "selected_scenarios": "short_term,seasonal_boiler,seasonal_hp",
     }
     default_inputs.update(load_design_inputs_from_excel(design_inputs_path))
@@ -624,6 +645,33 @@ def build_dashboard():
     a1 = pn.widgets.FloatInput(name="Collector a1", value=float(default_inputs["a1"]), step=0.1)
     a2 = pn.widgets.FloatInput(name="Collector a2", value=float(default_inputs["a2"]), step=0.001)
     collector_soiling_factor = pn.widgets.FloatInput(name="Collector Soiling Factor", value=float(default_inputs["collector_soiling_factor"]), step=0.01, start=0.0, end=1.0)
+    optimization_selection_mode = pn.widgets.Select(
+        name="Optimization Selection",
+        options={
+            "Absolute Minimum": "absolute_minimum",
+            "Compact Near-Optimal": "compact_near_optimal",
+        },
+        value=str(default_inputs["optimization_selection_mode"]),
+    )
+    optimization_cost_tolerance_pct = pn.widgets.FloatInput(
+        name="Cost Tolerance (%)",
+        value=float(default_inputs["optimization_cost_tolerance_pct"]),
+        step=0.5,
+    )
+    optimization_min_solar_coverage_pct = pn.widgets.FloatInput(
+        name="Minimum Solar Heating Ratio (%)",
+        value=float(default_inputs["optimization_min_solar_coverage_pct"]),
+        step=1.0,
+    )
+    optimization_auto_refine_search = pn.widgets.Checkbox(
+        name="Auto Refine Search",
+        value=bool(default_inputs["optimization_auto_refine_search"]),
+    )
+    optimization_refine_span_pct = pn.widgets.FloatInput(
+        name="Refine Span (%)",
+        value=float(default_inputs["optimization_refine_span_pct"]),
+        step=5.0,
+    )
 
     input_analysis = pn.pane.Markdown("")
     monthly_table = make_data_table(default_rows=12, min_height=260, max_height=900)
@@ -820,6 +868,11 @@ def build_dashboard():
             "a1": a1.value,
             "a2": a2.value,
             "collector_soiling_factor": collector_soiling_factor.value,
+            "optimization_selection_mode": optimization_selection_mode.value,
+            "optimization_cost_tolerance_pct": optimization_cost_tolerance_pct.value,
+            "optimization_min_solar_coverage_pct": optimization_min_solar_coverage_pct.value,
+            "optimization_auto_refine_search": optimization_auto_refine_search.value,
+            "optimization_refine_span_pct": optimization_refine_span_pct.value,
             "selected_scenarios": ",".join(selected_scenarios.value),
         }
 
@@ -859,13 +912,14 @@ def build_dashboard():
             scenario_state["selected_hourly_df"] = None
             scenario_state["tank_values"] = []
             scenario_state["status"].object = "Run the study to populate this tab."
+            scenario_state["optimization_summary"].object = ""
             scenario_state["metrics"].object = ""
             scenario_state["export_status"].object = ""
-            scenario_state["selected_area"].options = []
-            scenario_state["selected_area"].value = None
+            scenario_state["selected_area"].value = 0.0
             scenario_state["final_area"].value = 0.0
             scenario_state["final_tank"].value = 0.0
             set_table_data(scenario_state["best_table"], pd.DataFrame(), min_height=140, max_height=320)
+            set_table_data(scenario_state["near_opt_table"], pd.DataFrame(), min_height=140, max_height=320)
             set_table_data(scenario_state["summary_table"], pd.DataFrame(), min_height=280, max_height=1400)
             set_table_data(scenario_state["monthly_table"], pd.DataFrame(), min_height=320, max_height=900)
             set_plot(scenario_state["collector_plot"])
@@ -877,6 +931,8 @@ def build_dashboard():
             set_plot(scenario_state["tank_temp_plot"])
             set_plot(scenario_state["heating_plot"])
             set_plot(scenario_state["tank_flow_plot"])
+            set_plot(scenario_state["daily_heating_plot"])
+            set_plot(scenario_state["daily_tank_flow_plot"])
             set_plot(scenario_state["weather_temp_plot"])
             set_plot(scenario_state["weather_load_plot"])
             set_plot(scenario_state["weather_solar_plot"])
@@ -890,6 +946,76 @@ def build_dashboard():
     def selected_scenario_keys() -> list[str]:
         keys = [key for key in selected_scenarios.value if key in scenario_defs]
         return keys if keys else list(scenario_defs.keys())
+
+    def optimization_selection_kwargs() -> dict[str, float | str]:
+        return {
+            "selection_mode": optimization_selection_mode.value,
+            "cost_tolerance_pct": optimization_cost_tolerance_pct.value,
+            "min_solar_coverage_pct": optimization_min_solar_coverage_pct.value,
+        }
+
+    def refinement_enabled() -> bool:
+        return bool(optimization_auto_refine_search.value)
+
+    def refined_values(values: list[float], center_value: float) -> list[float]:
+        return refined_candidate_values(
+            values,
+            center_value=center_value,
+            refine_span_pct=optimization_refine_span_pct.value,
+        )
+
+    def update_optimization_reporting(scenario_state: dict[str, object], results_df: pd.DataFrame | None) -> None:
+        if results_df is None or results_df.empty:
+            scenario_state["optimization_summary"].object = ""
+            set_table_data(scenario_state["near_opt_table"], pd.DataFrame(), min_height=140, max_height=320)
+            return
+
+        strict_min = best_design(
+            results_df,
+            objective="cost",
+            selection_mode="absolute_minimum",
+            cost_tolerance_pct=0.0,
+            min_solar_coverage_pct=optimization_min_solar_coverage_pct.value,
+        )
+        recommended = best_design(results_df, objective="cost", **optimization_selection_kwargs())
+        near_opt_df = near_optimal_designs(
+            results_df,
+            objective="cost",
+            cost_tolerance_pct=optimization_cost_tolerance_pct.value,
+            min_solar_coverage_pct=optimization_min_solar_coverage_pct.value,
+        )
+        scenario_state["optimization_summary"].object = (
+            "#### Strict Minimum Design\n"
+            f"- Collector area: `{float(strict_min['collector_area_m2']):.1f} m2`\n"
+            f"- Tank volume: `{float(strict_min['tank_volume_m3']):.1f} m3`\n"
+            f"- Annualized total cost: `RMB {float(strict_min['annualized_total_cost']):.2f}`\n"
+            "\n"
+            "#### Recommended Near-Optimal Design\n"
+            f"- Selection mode: `{optimization_selection_mode.value}`\n"
+            f"- Cost tolerance: `{optimization_cost_tolerance_pct.value:.2f}%`\n"
+            f"- Minimum solar heating ratio: `{optimization_min_solar_coverage_pct.value:.2f}%`\n"
+            f"- Collector area: `{float(recommended['collector_area_m2']):.1f} m2`\n"
+            f"- Tank volume: `{float(recommended['tank_volume_m3']):.1f} m3`\n"
+            f"- Annualized total cost: `RMB {float(recommended['annualized_total_cost']):.2f}`\n"
+            "\n"
+            f"#### Near-Optimal Candidate Count\n- `{len(near_opt_df.index)}` cases"
+        )
+        near_opt_columns = [
+            column for column in [
+                "collector_area_m2",
+                "tank_volume_m3",
+                "annualized_total_cost",
+                "solar_coverage_pct",
+                "solar_energy_curtailed_kwh",
+            ]
+            if column in near_opt_df.columns
+        ]
+        set_table_data(
+            scenario_state["near_opt_table"],
+            near_opt_df[near_opt_columns].round(3).head(10),
+            min_height=140,
+            max_height=320,
+        )
 
     def update_sizing_mode(*_events) -> None:
         auto_visible = sizing_mode.value == "Auto Generate"
@@ -1020,7 +1146,7 @@ def build_dashboard():
             overall_status.object = f"### Error\n`{exc}`"
 
     def make_scenario_state(tab_title: str) -> dict[str, object]:
-        selected_area = pn.widgets.Select(name="Selected Collector Area (m2)", options=[])
+        selected_area = pn.widgets.FloatInput(name="Selected Collector Area (m2)", value=0.0, step=1.0)
         final_area = pn.widgets.FloatInput(name="Selected Collector Area (m2)", value=0.0, step=1.0)
         final_tank = pn.widgets.FloatInput(name="Selected Tank Size (m3)", value=0.0, step=1.0)
         run_final_button = pn.widgets.Button(name="Run Step 3 Final Results", button_type="success", width=BUTTON_WIDTH)
@@ -1036,6 +1162,7 @@ def build_dashboard():
         )
         scenario_state = {
             "status": pn.pane.Markdown("Run the study to populate this tab."),
+            "optimization_summary": pn.pane.Markdown(""),
             "metrics": pn.pane.Markdown(""),
             "export_status": pn.pane.Markdown(""),
             "selected_area": selected_area,
@@ -1045,6 +1172,7 @@ def build_dashboard():
             "export_button": export_button,
             "html_button": html_button,
             "best_table": make_data_table(default_rows=5, min_height=140, max_height=320),
+            "near_opt_table": make_data_table(default_rows=5, min_height=140, max_height=320),
             "monthly_table": make_data_table(default_rows=13, min_height=320, max_height=900),
             "summary_table": make_data_table(default_rows=12, min_height=280, max_height=1400),
             "collector_plot": plot_container(PLOT_HEIGHT),
@@ -1056,6 +1184,8 @@ def build_dashboard():
             "tank_temp_plot": plot_container(PLOT_HEIGHT),
             "heating_plot": plot_container(PLOT_HEIGHT),
             "tank_flow_plot": plot_container(PLOT_HEIGHT),
+            "daily_heating_plot": plot_container(PLOT_HEIGHT),
+            "daily_tank_flow_plot": plot_container(PLOT_HEIGHT),
             "weather_temp_plot": plot_container(PLOT_HEIGHT),
             "weather_load_plot": plot_container(PLOT_HEIGHT),
             "weather_solar_plot": plot_container(PLOT_HEIGHT),
@@ -1069,8 +1199,12 @@ def build_dashboard():
         }
         scenario_state["layout"] = pn.Column(
             scenario_state["status"],
+            pn.pane.Markdown("### Optimization Summary"),
+            scenario_state["optimization_summary"],
             pn.pane.Markdown("### Optimized Results"),
             scenario_state["best_table"],
+            pn.pane.Markdown("### Near-Optimal Candidates"),
+            scenario_state["near_opt_table"],
             pn.pane.Markdown("### Heatmaps"),
             pn.Row(scenario_state["cost_heatmap"], scenario_state["ratio_heatmap"], sizing_mode="stretch_width", margin=(0, 0, 6, 0)),
             pn.pane.Markdown("### Step 1: Collector Area"),
@@ -1087,6 +1221,9 @@ def build_dashboard():
             pn.Row(scenario_state["tank_temp_plot"], sizing_mode="stretch_width", margin=(0, 0, 6, 0)),
             pn.Row(scenario_state["heating_plot"], sizing_mode="stretch_width", margin=(0, 0, 6, 0)),
             pn.Row(scenario_state["tank_flow_plot"], sizing_mode="stretch_width", margin=(0, 0, 6, 0)),
+            pn.pane.Markdown("### Daily Results"),
+            pn.Row(scenario_state["daily_heating_plot"], sizing_mode="stretch_width", margin=(0, 0, 6, 0)),
+            pn.Row(scenario_state["daily_tank_flow_plot"], sizing_mode="stretch_width", margin=(0, 0, 6, 0)),
             pn.Column(
                 scenario_state["weather_temp_plot"],
                 scenario_state["weather_load_plot"],
@@ -1109,6 +1246,8 @@ def build_dashboard():
         definition = scenario_defs[scenario_key]
         if weather_df is None or scenario_state["selected_area"].value is None or not scenario_state["tank_values"]:
             return
+        if float(scenario_state["selected_area"].value) <= 0:
+            return
 
         scenario_state["final_area"].value = float(scenario_state["selected_area"].value)
 
@@ -1130,6 +1269,28 @@ def build_dashboard():
             ),
             **scenario_kwargs(definition),
         )
+        if refinement_enabled() and len(scenario_state["tank_values"]) > 1 and not tank_df.empty:
+            seed_case = best_design(tank_df, objective="cost", **optimization_selection_kwargs())
+            refined_tank_values = refined_values(scenario_state["tank_values"], float(seed_case["tank_volume_m3"]))
+            refined_tank_df = run_tank_size_study(
+                weather_load_df=weather_df,
+                collector_area_m2=float(scenario_state["selected_area"].value),
+                tank_size_list=refined_tank_values,
+                tank_types=[definition["tank_type"]],
+                progress_callback=lambda info, title=definition["tab_title"]: overall_status.__setattr__(
+                    "object",
+                    progress_text(
+                        "Step 2 tank refinement",
+                        int(info["current"]),
+                        int(info["total"]),
+                        title,
+                        float(info["collector_area_m2"]),
+                        float(info["tank_volume_m3"]),
+                    ),
+                ),
+                **scenario_kwargs(definition),
+            )
+            tank_df = merge_study_results(tank_df, refined_tank_df, ["tank_type", "tank_volume_m3"])
         scenario_state["tank_df"] = tank_df
         set_plot(scenario_state["tank_plot"], tank_df.hvplot.line(
             x="tank_volume_m3",
@@ -1156,7 +1317,7 @@ def build_dashboard():
             shared_axes=False,
         ))
         if scenario_state["final_tank"].value is None or scenario_state["final_tank"].value <= 0:
-            scenario_state["final_tank"].value = float(best_design(tank_df, objective="cost")["tank_volume_m3"])
+            scenario_state["final_tank"].value = float(best_design(tank_df, objective="cost", **optimization_selection_kwargs())["tank_volume_m3"])
 
     def update_scenario_final_view(scenario_key: str, *_events) -> None:
         weather_df = state["weather_df"]
@@ -1228,7 +1389,7 @@ def build_dashboard():
             height=PLOT_HEIGHT,
             grid=True,
             shared_axes=False,
-        )
+        ).opts(shared_axes=False, axiswise=True, framewise=True)
         tank_temp_df = plot_hourly_df.rename(
             columns={
                 "tank_top_temp_end_c": "Top",
@@ -1252,7 +1413,7 @@ def build_dashboard():
             height=PLOT_HEIGHT,
             grid=True,
             shared_axes=False,
-        ) * supply_overlay)
+        ).opts(shared_axes=False, axiswise=True, framewise=True) * supply_overlay)
         heating_plot_df = plot_hourly_df.rename(
             columns={
                 "heating_load_kwh": "Load",
@@ -1274,21 +1435,73 @@ def build_dashboard():
             shared_axes=False,
         ))
         tank_flow_df = hourly_df.assign(
+            Collected=hourly_df["solar_energy_collected_kwh"],
             Charge=hourly_df["tank_charge_kwh"],
             Discharge=-hourly_df["tank_discharge_total_kwh"],
             Loss=-hourly_df["tank_loss_kwh"],
         )
         set_plot(scenario_state["tank_flow_plot"], tank_flow_df.hvplot.line(
             x="timestamp",
-            y=["Charge", "Discharge", "Loss"],
+            y=["Collected", "Charge", "Discharge", "Loss"],
             ylabel="Tank Energy Flow (kWh)",
-            title="Tank Charging, Discharging, and Loss",
-            ylim=line_plot_ylim(tank_flow_df, ["Charge", "Discharge", "Loss"]),
+            title="Collector Energy, Tank Charging, Discharging, and Loss",
+            ylim=line_plot_ylim(tank_flow_df, ["Collected", "Charge", "Discharge", "Loss"]),
             legend="top",
             height=PLOT_HEIGHT,
             grid=True,
             shared_axes=False,
         ))
+        daily_df = daily_performance_from_hourly(hourly_df)
+        if daily_df.empty:
+            set_plot(scenario_state["daily_heating_plot"])
+            set_plot(scenario_state["daily_tank_flow_plot"])
+        else:
+            daily_heating_df = daily_df.rename(
+                columns={
+                    "date": "timestamp",
+                    "heating_load_kwh": "Load",
+                    "solar_direct_collector_to_load_kwh": "Collector",
+                    "solar_from_tank_direct_kwh": "Tank Direct",
+                    "solar_from_tank_via_hp_kwh": "Tank via HP",
+                    "auxiliary_heating_delivered_kwh": "Auxiliary",
+                }
+            )
+            daily_heating_df["timestamp"] = pd.to_datetime(daily_heating_df["timestamp"])
+            set_plot(scenario_state["daily_heating_plot"], daily_heating_df.hvplot.line(
+                x="timestamp",
+                y=["Load", "Collector", "Tank Direct", "Tank via HP", "Auxiliary"],
+                ylabel="Daily Heating Energy (kWh)",
+                title="Daily Heating Load and Sources",
+                ylim=line_plot_ylim(
+                    daily_heating_df,
+                    ["Load", "Collector", "Tank Direct", "Tank via HP", "Auxiliary"],
+                ),
+                legend="top",
+                height=PLOT_HEIGHT,
+                grid=True,
+                shared_axes=False,
+            ))
+            daily_tank_flow_df = daily_df.rename(
+                columns={
+                    "date": "timestamp",
+                    "solar_energy_collected_kwh": "Collected",
+                    "tank_charge_kwh": "Charge",
+                }
+            )
+            daily_tank_flow_df["timestamp"] = pd.to_datetime(daily_tank_flow_df["timestamp"])
+            daily_tank_flow_df["Discharge"] = -daily_tank_flow_df["tank_discharge_total_kwh"]
+            daily_tank_flow_df["Loss"] = -daily_tank_flow_df["tank_loss_kwh"]
+            set_plot(scenario_state["daily_tank_flow_plot"], daily_tank_flow_df.hvplot.line(
+                x="timestamp",
+                y=["Collected", "Charge", "Discharge", "Loss"],
+                ylabel="Daily Tank Energy Flow (kWh)",
+                title="Daily Collector Energy, Tank Charging, Discharging, and Loss",
+                ylim=line_plot_ylim(daily_tank_flow_df, ["Collected", "Charge", "Discharge", "Loss"]),
+                legend="top",
+                height=PLOT_HEIGHT,
+                grid=True,
+                shared_axes=False,
+            ))
         weather_plot_df = weather_df.rename(
             columns={
                 "outside_temp": "Outside",
@@ -1462,8 +1675,12 @@ def build_dashboard():
             ),
             static_markdown_pane(f"# {scenario_defs[scenario_key]['tab_title']}"),
             static_markdown_pane(str(scenario_state["status"].object)),
+            static_markdown_pane("## Optimization Summary"),
+            static_markdown_pane(str(scenario_state["optimization_summary"].object)),
             static_markdown_pane("## Optimized Results"),
             static_table_pane(scenario_state["best_table"].value, height=220),
+            static_markdown_pane("## Near-Optimal Candidates"),
+            static_table_pane(scenario_state["near_opt_table"].value, height=220),
             static_markdown_pane("## Heatmaps"),
             pn.Row(first_object(scenario_state["cost_heatmap"]), first_object(scenario_state["ratio_heatmap"]), sizing_mode="stretch_width"),
             static_markdown_pane("## Step 1: Collector Area"),
@@ -1484,6 +1701,9 @@ def build_dashboard():
             pn.Row(first_object(scenario_state["tank_temp_plot"]), sizing_mode="stretch_width"),
             pn.Row(first_object(scenario_state["heating_plot"]), sizing_mode="stretch_width"),
             pn.Row(first_object(scenario_state["tank_flow_plot"]), sizing_mode="stretch_width"),
+            static_markdown_pane("## Daily Results"),
+            pn.Row(first_object(scenario_state["daily_heating_plot"]), sizing_mode="stretch_width"),
+            pn.Row(first_object(scenario_state["daily_tank_flow_plot"]), sizing_mode="stretch_width"),
             pn.Column(
                 first_object(scenario_state["weather_temp_plot"]),
                 first_object(scenario_state["weather_load_plot"]),
@@ -1571,6 +1791,33 @@ def build_dashboard():
                 ),
                 **scenario_kwargs(definition),
             )
+            if refinement_enabled() and len(area_values) > 1 and len(tank_values) > 1 and not design_grid_df.empty:
+                seed_case = best_design(design_grid_df, objective="cost", **optimization_selection_kwargs())
+                refined_area_values = refined_values(area_values, float(seed_case["collector_area_m2"]))
+                refined_tank_values = refined_values(tank_values, float(seed_case["tank_volume_m3"]))
+                refined_design_grid_df = run_design_grid(
+                    weather_load_df=weather_df,
+                    collector_area_list=refined_area_values,
+                    tank_size_list=refined_tank_values,
+                    tank_types=[definition["tank_type"]],
+                    progress_callback=lambda info, title=definition["tab_title"]: overall_status.__setattr__(
+                        "object",
+                        progress_text(
+                            "Cost refinement",
+                            int(info["current"]),
+                            int(info["total"]),
+                            title,
+                            float(info["collector_area_m2"]),
+                            float(info["tank_volume_m3"]),
+                        ),
+                    ),
+                    **scenario_kwargs(definition),
+                )
+                design_grid_df = merge_study_results(
+                    design_grid_df,
+                    refined_design_grid_df,
+                    ["tank_type", "collector_area_m2", "tank_volume_m3"],
+                )
             scenario_state["design_grid_df"] = design_grid_df
 
         if mode in {"two_step", "combined"}:
@@ -1593,6 +1840,33 @@ def build_dashboard():
                 ),
                 **scenario_kwargs(definition),
             )
+            if refinement_enabled() and len(area_values) > 1 and not collector_df.empty:
+                area_seed = best_design(collector_df, objective="cost", **optimization_selection_kwargs())
+                refined_area_values = refined_values(area_values, float(area_seed["collector_area_m2"]))
+                refined_collector_df = run_collector_area_study(
+                    weather_load_df=weather_df,
+                    collector_area_list=refined_area_values,
+                    tank_types=[definition["tank_type"]],
+                    short_term_ratio_l_per_m2=definition["ratio_value"](),
+                    seasonal_ratio_l_per_m2=definition["ratio_value"](),
+                    progress_callback=lambda info, title=definition["tab_title"]: overall_status.__setattr__(
+                        "object",
+                        progress_text(
+                            "Step 1 collector refinement",
+                            int(info["current"]),
+                            int(info["total"]),
+                            title,
+                            float(info["collector_area_m2"]),
+                            float(info["tank_volume_m3"]),
+                        ),
+                    ),
+                    **scenario_kwargs(definition),
+                )
+                collector_df = merge_study_results(
+                    collector_df,
+                    refined_collector_df,
+                    ["tank_type", "collector_area_m2"],
+                )
             scenario_state["collector_df"] = collector_df
 
         scenario_state["tank_values"] = tank_values
@@ -1600,11 +1874,11 @@ def build_dashboard():
         if design_grid_df is not None and not design_grid_df.empty:
             set_table_data(scenario_state["best_table"], design_grid_df.nsmallest(5, "annualized_total_cost").round(3), min_height=140, max_height=320)
             set_table_data(scenario_state["summary_table"], design_grid_df.round(3), min_height=280, max_height=1400)
-            best_case = best_design(design_grid_df, objective="cost")
+            best_case = best_design(design_grid_df, objective="cost", **optimization_selection_kwargs())
+            update_optimization_reporting(scenario_state, design_grid_df)
             initial_cost = float(best_case["collector_capital_cost"]) + float(best_case["tank_capital_cost"])
             solar_collected = float(best_case["solar_energy_collected_kwh"])
             heat_loss_pct = 100.0 * float(best_case["tank_loss_kwh"]) / solar_collected if solar_collected > 0 else 0.0
-            scenario_state["selected_area"].options = area_values
             scenario_state["selected_area"].value = float(best_case["collector_area_m2"])
             scenario_state["final_area"].value = float(best_case["collector_area_m2"])
             scenario_state["final_tank"].value = float(best_case["tank_volume_m3"])
@@ -1657,8 +1931,8 @@ def build_dashboard():
                 shared_axes=False,
             ))
             if mode == "two_step":
-                area_best = best_design(collector_df, objective="cost")
-                scenario_state["selected_area"].options = area_values
+                area_best = best_design(collector_df, objective="cost", **optimization_selection_kwargs())
+                update_optimization_reporting(scenario_state, collector_df)
                 scenario_state["selected_area"].value = float(area_best["collector_area_m2"])
                 scenario_state["final_area"].value = float(area_best["collector_area_m2"])
                 set_table_data(scenario_state["best_table"], collector_df.nsmallest(5, "annualized_total_cost").round(3), min_height=140, max_height=320)
@@ -1667,6 +1941,7 @@ def build_dashboard():
         if mode in {"two_step", "combined"}:
             update_scenario_tank_study(scenario_key)
             if scenario_state["tank_df"] is not None and not scenario_state["tank_df"].empty:
+                update_optimization_reporting(scenario_state, scenario_state["tank_df"])
                 set_table_data(scenario_state["best_table"], scenario_state["tank_df"].nsmallest(5, "annualized_total_cost").round(3), min_height=140, max_height=320)
                 if mode == "two_step":
                     set_table_data(scenario_state["summary_table"], scenario_state["tank_df"].round(3), min_height=280, max_height=1400)
@@ -1705,6 +1980,12 @@ def build_dashboard():
                     raise ValueError(f"{label} must be between 0.0 and 0.45.")
             if not 0.0 <= collector_soiling_factor.value <= 1.0:
                 raise ValueError("Collector soiling factor must be between 0.0 and 1.0.")
+            if optimization_cost_tolerance_pct.value < 0:
+                raise ValueError("Cost tolerance must be zero or greater.")
+            if not 0.0 <= optimization_min_solar_coverage_pct.value <= 100.0:
+                raise ValueError("Minimum solar heating ratio must be between 0 and 100.")
+            if optimization_refine_span_pct.value <= 0:
+                raise ValueError("Refine span must be greater than zero.")
             if state["weather_df"] is None:
                 analyze_inputs()
             scenario_keys = selected_scenario_keys()
@@ -1809,6 +2090,9 @@ def build_dashboard():
         pn.Row(collector_cost_per_m2, project_lifetime_years),
         pn.Row(short_term_cost_coeff, short_term_cost_exponent),
         pn.Row(seasonal_cost_coeff, seasonal_cost_exponent),
+        pn.pane.Markdown("### Optimization Settings"),
+        pn.Row(optimization_selection_mode, optimization_cost_tolerance_pct, optimization_min_solar_coverage_pct),
+        pn.Row(optimization_auto_refine_search, optimization_refine_span_pct),
         pn.pane.Markdown("### Candidate Size Inputs"),
         sizing_mode,
         pn.pane.Markdown("#### Short-Term Storage"),
