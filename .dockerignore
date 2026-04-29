@@ -1,0 +1,35 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+*.egg-info/
+dist/
+build/
+.git/
+.gitignore
+.idea/
+.vscode/
+*.md
+*.docx
+*.xlsx
+!design_inputs.xlsx
+!design_inputs.json
+.dockerignore
+Dockerfile
+docker-compose.yml
+*.log
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+02 reports/*
+!02 reports/.gitkeep
+deploy.sh
+deploy.bat
+.env
+.env.example

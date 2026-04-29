@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  solar-heating:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: solar-heating:latest
+    container_name: solar-heating-app
+    ports:
+      - "8003:8003"
+    environment:
+      - SOLAR_PORT=8003
+      - SOLAR_HOST=0.0.0.0
+      - JWT_SECRET=${JWT_SECRET:-ferry}
+      - BYPASS_AUTH=${BYPASS_AUTH:-false}
+      - ALLOWED_ROLES=${ALLOWED_ROLES:-["admin", "solar_admin"]}
+      - PANEL_APP_NAME=SolarHeating
+      - PANEL_WORKERS=1
+      - ALLOWED_WEBSOCKET_ORIGINS=solar.cdqrmi.com,localhost,127.0.0.1
+      - BOKEH_ALLOW_WS_ORIGIN=solar.cdqrmi.com,localhost,127.0.0.1
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    volumes:
+      - ./01 input files:/app/01 input files
+      - ./02 reports:/app/02 reports
+      - ./design_inputs.xlsx:/app/design_inputs.xlsx
+      - ./design_inputs.json:/app/design_inputs.json
+    restart: on-failure:5
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "--connect-timeout", "10", "--max-time", "30", "http://localhost:8003/"]
+      interval: 180s
+      timeout: 60s
+      retries: 2
+      start_period: 300s
+    networks:
+      - solar-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+    stop_grace_period: 30s
+    stop_signal: SIGTERM
+
+networks:
+  solar-network:
+    driver: bridge

@@ -76,6 +76,8 @@ The current collector inlet strategy is:
 ### Short-Term Storage
 
 - collector inlet temperature = `average tank temperature`
+- direct collector-to-load heating is allowed when collector outlet temperature reaches heating supply temperature
+- otherwise useful collected solar heat goes to the tank first
 
 ### Long-Term Storage
 
@@ -98,15 +100,45 @@ Then the inlet is clipped so it cannot fall below `tank_min_temp`.
 Then:
 
 ```text
-collector outlet temperature = inlet temperature + solar_collector_delta_t
+collector outlet temperature = inlet temperature + actual_collector_delta_t
 collector mean fluid temperature = (inlet + outlet) / 2
 ```
 
-This mean temperature is used in the collector efficiency equation.
+The current model no longer assumes a fixed collector `deltaT`.
+
+Instead it calculates a dynamic collector temperature rise from:
+
+```text
+Q = m_dot * Cp * deltaT
+deltaT = Q / (m_dot * Cp)
+```
+
+Where:
+
+- `Q` = useful collector power
+- `m_dot` = collector loop mass flow rate
+- `Cp` = water heat capacity
+
+The code uses:
+
+- `Nominal Solar Collector Delta T` as the initial guess
+- `Collector Flow (L/h/m2)` to convert area into loop flow
+- `Collector Delta T Min`
+- `Collector Delta T Max`
+
+It then iterates a few times:
+
+1. guess `deltaT`
+2. calculate collector mean temperature
+3. calculate useful solar heat
+4. update `deltaT` from `Q = mCpΔT`
+5. clip the result to the configured minimum and maximum
+
+This mean temperature is then used in the collector efficiency equation.
 
 Practical interpretation:
 
-- short-term tank: collector performance is linked to the whole tank average
+- short-term tank: collector uses the average tank temperature and can serve heating directly when collector outlet temperature is hot enough
 - long-term tank during active heating: collector uses the higher of bottom-tank temperature and heating return temperature
 - long-term tank during storage-only charging: collector sees the colder bottom of the tank
 
@@ -131,6 +163,12 @@ If direct mode is not enabled:
 
 - direct solar to load = `0`
 - collected solar is treated as available for tank charging
+
+Current practical meaning:
+
+- `short_term`: direct solar first when hot enough, otherwise tank-first
+- `seasonal_boiler`: direct solar first, then surplus to tank
+- `seasonal_hp`: direct solar first, then surplus to tank
 
 ## 6. Surplus Solar Logic
 
@@ -266,17 +304,51 @@ Important behavior:
 
 ### Direct Discharge Step
 
-For direct heating, the model only takes energy above `heating_supply_temp`.
+All scenarios now use a withdraw-to-return direct-discharge model with bottom reinjection.
 
-For each node:
+The rule is:
+
+- a layer can directly serve heating only if `layer_temp > heating_supply_temp`
+- the useful heat from that layer is based on cooling it toward `heating_return_temp`
+- the cooled return water is reinjected into the bottom layer
+
+The simplified node model does:
 
 ```text
-available_kwh = max(node_temp - heating_supply_temp, 0) * kWh_per_K_per_node
-used_kwh = min(remaining_demand_kwh, available_kwh)
-new_node_temp = old_node_temp - used_kwh / kWh_per_K_per_node
+available_useful_kwh = (layer_temp - return_temp) * kWh_per_K_per_node
+used_kwh = min(remaining_load_kwh, available_useful_kwh)
+circulation_fraction = used_kwh / available_useful_kwh
+bottom_new = bottom_old + circulation_fraction * (return_temp - bottom_old)
+top_energy_removed = used_kwh + bottom_energy_change
+top_new = top_old - top_energy_removed / kWh_per_K_per_node
 ```
 
-So a node can be cooled down to the supply-temperature threshold, but not below that, in direct tank discharge mode.
+This is an approximate but energy-consistent way to represent:
+
+- hot water withdrawal from the top
+- heat delivery to the load
+- cooler return water reinjection into the bottom of the tank
+
+So for all direct-heating cases, the tank can effectively be cooled toward return temperature, not just supply temperature.
+
+## 9A. Storage Quality Diagnostics
+
+The model now also tracks average stored-energy quality over the simulation:
+
+- energy above supply temperature
+- energy between return and supply temperature
+- energy below return temperature
+
+These are reported both as:
+
+- average `kWh`
+- percentage of average stored tank energy
+
+They are useful for comparing small and large tanks consistently:
+
+- a tank with more energy above supply is strong for direct heating
+- a tank with more energy between return and supply is strong for partial direct-heating credit
+- a tank with more energy below return is mainly low-grade storage
 
 ### Heat Pump Source Discharge Step
 
@@ -333,11 +405,13 @@ So a tank can still contain a large amount of energy while its top or mean tempe
 
 ### Direct Heating from Tank
 
-For both short-term and long-term boiler-style direct heating, the tank can directly serve load only from layers at or above:
+For all scenarios, a layer must be at or above the heating supply temperature to begin direct delivery to the load:
 
 ```text
 threshold = heating_supply_temp
 ```
+
+Once a layer is eligible, the direct-heating model can cool that circulated water toward return temperature because the return water is reinjected to the tank bottom.
 
 So heat below the supply temperature is not counted as directly usable in the direct-heating model.
 
