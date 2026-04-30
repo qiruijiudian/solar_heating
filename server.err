@@ -1,0 +1,45 @@
+INFO:__main__:Starting Solar Heating application...
+INFO:__main__:  Host: 0.0.0.0
+INFO:__main__:  Port: 8003
+INFO:__main__:  JWT Secret: ***
+INFO:__main__:  Bypass Auth: True
+INFO:__main__:  Allowed Roles: ['admin', 'solar_admin']
+INFO:__main__:  Workers: 1
+INFO:__main__:Development mode: Authentication bypassed
+INFO:__main__:Access the application at: http://localhost:8003
+INFO:bokeh.server.server:Starting Bokeh server version 3.9.0 (running on Tornado 6.5.5)
+INFO:bokeh.server.tornado:User authentication hooks NOT provided (default user enabled)
+WARNING:bokeh.core.validation.check:W-1005 (FIXED_SIZING_MODE): 'fixed' sizing mode requires width and height to be set: Column(id='p1055', ...)
+WARNING:bokeh.core.validation.check:W-1005 (FIXED_SIZING_MODE): 'fixed' sizing mode requires width and height to be set: Column(id='p1045', ...)
+WARNING:bokeh.core.validation.check:W-1005 (FIXED_SIZING_MODE): 'fixed' sizing mode requires width and height to be set: Row(id='p1044', ...)
+INFO:tornado.access:200 GET / (127.0.0.1) 1399.88ms
+INFO:tornado.access:200 GET /static/extensions/panel/bundled/datatabulator/tabulator-tables@6.3.1/dist/js/tabulator.min.js (127.0.0.1) 14.81ms
+INFO:tornado.access:200 GET /static/extensions/panel/bundled/datatabulator/tabulator-tables@6.3.1/dist/css/tabulator_simple.min.css?v=1.8.10 (127.0.0.1) 8.18ms
+INFO:tornado.access:200 GET /static/extensions/panel/bundled/reactiveesm/es-module-shims@%5E1.10.0/dist/es-module-shims.min.js (127.0.0.1) 14.62ms
+INFO:tornado.access:200 GET /static/extensions/panel/css/loadingspinner.css?v=1.8.10 (127.0.0.1) 10.95ms
+INFO:tornado.access:200 GET /static/extensions/panel/css/listpanel.css?v=1.8.10 (127.0.0.1) 4.21ms
+INFO:tornado.access:200 GET /static/extensions/panel/css/markdown.css?v=1.8.10 (127.0.0.1) 3.01ms
+INFO:tornado.access:200 GET /static/extensions/panel/bundled/font-awesome/css/all.min.css?v=1.8.10 (127.0.0.1) 4.17ms
+INFO:tornado.access:200 GET /static/extensions/panel/css/select.css?v=1.8.10 (127.0.0.1) 6.39ms
+INFO:tornado.access:200 GET /static/extensions/panel/css/button.css?v=1.8.10 (127.0.0.1) 6.24ms
+INFO:tornado.access:200 GET /static/extensions/panel/css/multichoice.css?v=1.8.10 (127.0.0.1) 10.58ms
+INFO:tornado.access:200 GET /static/extensions/panel/css/loading.css?v=1.8.10 (127.0.0.1) 13.40ms
+INFO:tornado.access:200 GET /static/extensions/panel/bundled/theme/default.css?v=1.8.10 (127.0.0.1) 8.99ms
+INFO:tornado.access:200 GET /static/extensions/panel/bundled/fastbasetemplate/fast.css?v=1.8.10 (127.0.0.1) 9.13ms
+INFO:tornado.access:200 GET /static/extensions/panel/bundled/fastlisttemplate/fast_list_template.css?v=1.8.10 (127.0.0.1) 14.87ms
+INFO:tornado.access:200 GET /static/extensions/panel/bundled/datatabulator/luxon/build/global/luxon.min.js (127.0.0.1) 10.97ms
+INFO:tornado.access:200 GET /static/js/bokeh.min.js?v=2630124d82b67a204b9c9da925d3d456e9ec585bb0cf8f839a1c704dbee3f200b70d237916a9fd429755022dc83ac334505cd7385ebb4453a7b17aa1d3699c35 (127.0.0.1) 18.10ms
+INFO:tornado.access:200 GET /static/js/bokeh-gl.min.js?v=b803cb051212c1e9f0fba71c62739c0cfb38114322d67a2ace60eee732710b6541d80907d9fcf0afb2f962c368f1db1e30b8800652d9510d1b801727f9669eb2 (127.0.0.1) 21.22ms
+INFO:tornado.access:200 GET /static/js/bokeh-widgets.min.js?v=aa4c33f38bd3425dafb970d1ce795ccf91e608a9a6d4db35f85f382954d7a91abf76031394f3af6ecb919a1b5dbbfefa2734c7a543132a8f0c0f24a2f9d3237b (127.0.0.1) 6.09ms
+INFO:tornado.access:200 GET /static/extensions/panel/panel.min.js?v=b081f23dfb5efd1bbe84e7fda7427a25cfc354ce9fbf1fd8e5c35899acb2b3bb (127.0.0.1) 10.47ms
+INFO:tornado.access:200 GET /static/js/bokeh-tables.min.js?v=62532f6ff926a41c47def08668ee2cec06b351a8e8a5ca01a21fdc78811c3fc5d6b048deaf949f6abc5c6963b7bbf56ea285d6ada0b7a61191449d0d115bf737 (127.0.0.1) 28.90ms
+INFO:tornado.access:200 GET /static/extensions/panel/bundled/@microsoft/fast-components@2.30.6/dist/fast-components.js (127.0.0.1) 31.20ms
+INFO:tornado.access:200 GET /static/extensions/panel/bundled/fast/js/fast_design.js (127.0.0.1) 31.76ms
+INFO:tornado.access:200 GET /static/js/bokeh-mathjax.min.js?v=03ca8f404ba96ea2376b99248bf79a79084be396de8b5a1b95cb017567540ea3b565dcc8c0baa78446abbddeba0f2ea6bfe0cff8551bf8d9a11deb67c70a63f2 (127.0.0.1) 49.41ms
+INFO:tornado.access:200 GET /static/extensions/panel/bundled/fastbasetemplate/fast_template.js (127.0.0.1) 5.12ms
+INFO:tornado.access:200 GET /favicon.ico (127.0.0.1) 1.11ms
+INFO:tornado.access:101 GET /ws (127.0.0.1) 1.92ms
+INFO:bokeh.server.views.ws:WebSocket connection opened
+INFO:bokeh.server.views.ws:ServerConnection created
+INFO:tornado.access:200 GET /static/extensions/panel/bundled/theme/fast.css?v=1.8.10 (127.0.0.1) 3.73ms
+INFO:tornado.access:200 GET /static/extensions/panel/bundled/datatabulator/tabulator-tables@6.3.1/dist/css/tabulator_fast.min.css?v=1.8.10 (127.0.0.1) 3.37ms

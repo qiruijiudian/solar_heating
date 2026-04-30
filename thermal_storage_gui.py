@@ -7,6 +7,8 @@ import html
 from io import BytesIO
 from pathlib import Path
 import sys
+import tkinter as tk
+from tkinter import filedialog
 
 import numpy as np
 
@@ -1223,6 +1225,11 @@ def build_dashboard():
             button_type="light",
             width=BUTTON_WIDTH,
         )
+        export_all_data_button = pn.widgets.Button(
+            name="Export All Data (Choose Path)",
+            button_type="primary",
+            width=BUTTON_WIDTH,
+        )
         sensitivity_multipliers = pn.widgets.TextInput(name="Load Multiplier List", value="1.0, 1.1, 1.2, 1.3")
         run_sensitivity_button = pn.widgets.Button(name="Run Step 4 Sensitivity", button_type="primary", width=BUTTON_WIDTH)
         save_sensitivity_button = pn.widgets.Button(
@@ -1243,6 +1250,7 @@ def build_dashboard():
             "run_final_button": run_final_button,
             "export_button": export_button,
             "html_button": html_button,
+            "export_all_data_button": export_all_data_button,
             "sensitivity_multipliers": sensitivity_multipliers,
             "run_sensitivity_button": run_sensitivity_button,
             "save_sensitivity_button": save_sensitivity_button,
@@ -1293,7 +1301,7 @@ def build_dashboard():
             pn.Row(scenario_state["tank_plot"], scenario_state["tank_eff_plot"], sizing_mode="stretch_width", margin=(0, 0, 6, 0)),
             pn.pane.Markdown("### Step 3: Final Selected Design"),
             pn.Row(final_area, final_tank, sizing_mode="stretch_width", margin=(0, 0, 6, 0)),
-            pn.Row(run_final_button, export_button, html_button, sizing_mode="stretch_width", margin=(0, 0, 6, 0)),
+            pn.Row(run_final_button, export_button, html_button, export_all_data_button, sizing_mode="stretch_width", margin=(0, 0, 6, 0)),
             scenario_state["export_status"],
             pn.pane.Markdown("### Step 3 Results"),
             scenario_state["metrics"],
@@ -1857,6 +1865,95 @@ def build_dashboard():
         except Exception as exc:
             scenario_state["export_status"].object = f"Export failed: `{exc}`"
 
+    def export_all_scenario_data(scenario_key: str) -> None:
+        """Export all scenario data to user-selected path."""
+        scenario_state = state["scenarios"][scenario_key]
+        
+        # Check if Step 3 has been run
+        if scenario_state["selected_summary"] is None or scenario_state["selected_hourly_df"] is None:
+            raise ValueError("Run Step 3 Final Results before exporting all data.")
+        
+        # Open file dialog for user to select save location
+        root = tk.Tk()
+        root.withdraw()  # Hide the main window
+        root.attributes('-topmost', True)  # Bring dialog to front
+        
+        # Generate default filename
+        default_filename = f"{scenario_key}_all_data_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        
+        # Ask user for save location
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
+            initialfile=default_filename,
+            title="Save All Scenario Data"
+        )
+        root.destroy()
+        
+        if not file_path:
+            return  # User cancelled
+        
+        # Export comprehensive data
+        output_path = Path(file_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            # Sheet 1: Project Inputs
+            project_inputs = {
+                **current_design_inputs(),
+                "scenario_key": scenario_key,
+                "scenario_title": scenario_defs[scenario_key]["tab_title"],
+                "hourly_input_file": display_hourly_input_path(),
+                "report_generated_at": pd.Timestamp.now().isoformat(),
+            }
+            pd.DataFrame([project_inputs]).to_excel(writer, sheet_name='project_inputs', index=False)
+            
+            # Sheet 2: Final Summary
+            if scenario_state["selected_summary"]:
+                pd.DataFrame([scenario_state["selected_summary"]]).to_excel(writer, sheet_name='final_summary', index=False)
+            
+            # Sheet 3: Step 1 Results
+            if scenario_state["collector_df"] is not None and not scenario_state["collector_df"].empty:
+                scenario_state["collector_df"].to_excel(writer, sheet_name='step1_results', index=False)
+            
+            # Sheet 4: Step 2 Results
+            if scenario_state["tank_df"] is not None and not scenario_state["tank_df"].empty:
+                scenario_state["tank_df"].to_excel(writer, sheet_name='step2_results', index=False)
+            
+            # Sheet 5: Optimization Grid
+            if scenario_state["design_grid_df"] is not None and not scenario_state["design_grid_df"].empty:
+                scenario_state["design_grid_df"].to_excel(writer, sheet_name='optimization_grid', index=False)
+            
+            # Sheet 6: Hourly Results
+            if scenario_state["selected_hourly_df"] is not None and not scenario_state["selected_hourly_df"].empty:
+                scenario_state["selected_hourly_df"].to_excel(writer, sheet_name='hourly_results', index=False)
+            
+            # Sheet 7: Monthly Summary
+            if scenario_state["monthly_table"].value is not None and not scenario_state["monthly_table"].value.empty:
+                scenario_state["monthly_table"].value.to_excel(writer, sheet_name='monthly_summary', index=False)
+            
+            # Sheet 8: Input Monthly Data
+            if state["input_monthly_df"] is not None and not state["input_monthly_df"].empty:
+                state["input_monthly_df"].to_excel(writer, sheet_name='input_monthly_data', index=False)
+            
+            # Sheet 9: Best Designs
+            if scenario_state["best_table"].value is not None and not scenario_state["best_table"].value.empty:
+                scenario_state["best_table"].value.to_excel(writer, sheet_name='best_designs', index=False)
+            
+            # Sheet 10: Near-Optimal Candidates
+            if scenario_state["near_opt_table"].value is not None and not scenario_state["near_opt_table"].value.empty:
+                scenario_state["near_opt_table"].value.to_excel(writer, sheet_name='near_optimal_candidates', index=False)
+        
+        scenario_state["export_status"].object = f"All data exported to `{output_path}`"
+
+    def on_export_all_data_click(scenario_key: str) -> None:
+        """Handler for export all data button click."""
+        scenario_state = state["scenarios"][scenario_key]
+        try:
+            export_all_scenario_data(scenario_key)
+        except Exception as exc:
+            scenario_state["export_status"].object = f"Export all data failed: `{exc}`"
+
     def build_static_scenario_report(scenario_key: str) -> pn.Column:
         scenario_state = state["scenarios"][scenario_key]
         return pn.Column(
@@ -2253,6 +2350,7 @@ def build_dashboard():
         scenario_state["run_final_button"].on_click(lambda _event, key=scenario_key: update_scenario_final_view(key))
         scenario_state["export_button"].on_click(lambda _event, key=scenario_key: on_export_click(key))
         scenario_state["html_button"].on_click(lambda _event, key=scenario_key: on_html_click(key))
+        scenario_state["export_all_data_button"].on_click(lambda _event, key=scenario_key: on_export_all_data_click(key))
         scenario_state["run_sensitivity_button"].on_click(lambda _event, key=scenario_key: run_scenario_load_sensitivity(key))
         scenario_state["save_sensitivity_button"].on_click(lambda _event, key=scenario_key: on_sensitivity_save_click(key))
 
