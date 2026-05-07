@@ -255,16 +255,20 @@ def scenario_monthly_summary(hourly_df: pd.DataFrame) -> pd.DataFrame:
     working = hourly_df.copy()
     working["month"] = working["timestamp"].dt.to_period("M").astype(str)
     agg_map: dict[str, tuple[str, object]] = {
-        "total_heating_load_kwh": ("heating_load_kwh", "sum"),
+        "total_heating_load_mwh": ("heating_load_kwh", lambda x: x.sum() / 1000.0),
         "average_heating_load_kwh": ("heating_load_kwh", "mean"),
-        "usable_solar_heat_kwh": ("solar_source_energy_used_kwh", "sum"),
-        "solar_heating_energy_kwh": ("solar_heating_total_kwh", "sum"),
-        "auxiliary_energy_kwh": ("auxiliary_energy_input_kwh", "sum"),
-        "heat_pump_power_input_kwh": ("auxiliary_energy_for_hp_boost_kwh", "sum"),
+        "usable_solar_heat_mwh": ("solar_source_energy_used_kwh", lambda x: x.sum() / 1000.0),
+        "solar_heating_energy_mwh": ("solar_heating_total_kwh", lambda x: x.sum() / 1000.0),
+        "solar_direct_collector_to_load_mwh": ("solar_direct_collector_to_load_kwh", lambda x: x.sum() / 1000.0),
+        "solar_from_tank_direct_mwh": ("solar_from_tank_direct_kwh", lambda x: x.sum() / 1000.0),
+        "solar_from_tank_via_hp_mwh": ("solar_from_tank_via_hp_kwh", lambda x: x.sum() / 1000.0),
+        "auxiliary_energy_mwh": ("auxiliary_energy_input_kwh", lambda x: x.sum() / 1000.0),
+        "heat_pump_power_input_mwh": ("auxiliary_energy_for_hp_boost_kwh", lambda x: x.sum() / 1000.0),
         "collector_efficiency_pct": ("collector_efficiency", lambda values: 100.0 * values.mean()),
-        "tank_charge_kwh": ("tank_charge_kwh", "sum"),
-        "tank_loss_kwh": ("tank_loss_kwh", "sum"),
-        "solar_curtailed_kwh": ("solar_energy_curtailed_kwh", "sum"),
+        "tank_charge_mwh": ("tank_charge_kwh", lambda x: x.sum() / 1000.0),
+        "tank_discharge_total_mwh": ("tank_discharge_total_kwh", lambda x: x.sum() / 1000.0),
+        "tank_loss_mwh": ("tank_loss_kwh", lambda x: x.sum() / 1000.0),
+        "solar_curtailed_mwh": ("solar_energy_curtailed_kwh", lambda x: x.sum() / 1000.0),
     }
     monthly_df = working.groupby("month", as_index=False).agg(**agg_map)
     productive_working = working[working["solar_energy_collected_kwh"] > 0].copy()
@@ -278,27 +282,31 @@ def scenario_monthly_summary(hourly_df: pd.DataFrame) -> pd.DataFrame:
         monthly_df["month"].map(productive_efficiency_by_month).fillna(0.0)
     )
     monthly_df["solar_heat_ratio_pct"] = np.where(
-        monthly_df["total_heating_load_kwh"] > 0,
-        100.0 * monthly_df["solar_heating_energy_kwh"] / monthly_df["total_heating_load_kwh"],
+        monthly_df["total_heating_load_mwh"] > 0,
+        100.0 * monthly_df["solar_heating_energy_mwh"] / monthly_df["total_heating_load_mwh"],
         0.0,
     )
     annual_row = pd.DataFrame(
         [
             {
                 "month": "Annual Summary",
-                "total_heating_load_kwh": monthly_df["total_heating_load_kwh"].sum(),
+                "total_heating_load_mwh": monthly_df["total_heating_load_mwh"].sum(),
                 "average_heating_load_kwh": working["heating_load_kwh"].mean(),
-                "usable_solar_heat_kwh": monthly_df["usable_solar_heat_kwh"].sum(),
-                "solar_heating_energy_kwh": monthly_df["solar_heating_energy_kwh"].sum(),
-                "auxiliary_energy_kwh": monthly_df["auxiliary_energy_kwh"].sum(),
-                "heat_pump_power_input_kwh": monthly_df["heat_pump_power_input_kwh"].sum(),
+                "usable_solar_heat_mwh": monthly_df["usable_solar_heat_mwh"].sum(),
+                "solar_heating_energy_mwh": monthly_df["solar_heating_energy_mwh"].sum(),
+                "solar_direct_collector_to_load_mwh": monthly_df["solar_direct_collector_to_load_mwh"].sum(),
+                "solar_from_tank_direct_mwh": monthly_df["solar_from_tank_direct_mwh"].sum(),
+                "solar_from_tank_via_hp_mwh": monthly_df["solar_from_tank_via_hp_mwh"].sum(),
+                "auxiliary_energy_mwh": monthly_df["auxiliary_energy_mwh"].sum(),
+                "heat_pump_power_input_mwh": monthly_df["heat_pump_power_input_mwh"].sum(),
                 "collector_efficiency_pct": annual_productive_efficiency_pct,
-                "tank_charge_kwh": monthly_df["tank_charge_kwh"].sum(),
-                "tank_loss_kwh": monthly_df["tank_loss_kwh"].sum(),
-                "solar_curtailed_kwh": monthly_df["solar_curtailed_kwh"].sum(),
+                "tank_charge_mwh": monthly_df["tank_charge_mwh"].sum(),
+                "tank_discharge_total_mwh": monthly_df["tank_discharge_total_mwh"].sum(),
+                "tank_loss_mwh": monthly_df["tank_loss_mwh"].sum(),
+                "solar_curtailed_mwh": monthly_df["solar_curtailed_mwh"].sum(),
                 "solar_heat_ratio_pct": (
-                    100.0 * monthly_df["solar_heating_energy_kwh"].sum() / monthly_df["total_heating_load_kwh"].sum()
-                    if monthly_df["total_heating_load_kwh"].sum() > 0
+                    100.0 * monthly_df["solar_heating_energy_mwh"].sum() / monthly_df["total_heating_load_mwh"].sum()
+                    if monthly_df["total_heating_load_mwh"].sum() > 0
                     else 0.0
                 ),
             }
@@ -919,6 +927,8 @@ def build_dashboard():
             scenario_state["run_final_button"].disabled = is_running
             scenario_state["export_button"].disabled = is_running or scenario_state["selected_summary"] is None
             scenario_state["html_button"].disabled = is_running or scenario_state["selected_summary"] is None
+            scenario_state["download_button"].disabled = is_running or scenario_state["selected_summary"] is None
+            scenario_state["export_monthly_button"].disabled = is_running or scenario_state["selected_summary"] is None
             scenario_state["run_sensitivity_button"].disabled = is_running
             scenario_state["save_sensitivity_button"].disabled = (
                 is_running or scenario_state["sensitivity_df"] is None
@@ -975,6 +985,8 @@ def build_dashboard():
             set_plot(scenario_state["sensitivity_plot"])
             scenario_state["export_button"].disabled = True
             scenario_state["html_button"].disabled = True
+            scenario_state["download_button"].disabled = True
+            scenario_state["export_monthly_button"].disabled = True
             scenario_state["save_sensitivity_button"].disabled = True
 
     def clear_current_results(_event=None) -> None:
@@ -1225,6 +1237,16 @@ def build_dashboard():
             button_type="light",
             width=BUTTON_WIDTH,
         )
+        download_button = pn.widgets.Button(
+            name="Download Both Reports",
+            button_type="success",
+            width=BUTTON_WIDTH,
+        )
+        export_monthly_button = pn.widgets.Button(
+            name="Export Monthly Summary",
+            button_type="warning",
+            width=BUTTON_WIDTH,
+        )
         export_all_data_button = pn.widgets.Button(
             name="Export All Data (Choose Path)",
             button_type="primary",
@@ -1250,7 +1272,10 @@ def build_dashboard():
             "run_final_button": run_final_button,
             "export_button": export_button,
             "html_button": html_button,
+            "download_button": download_button,
+            "export_monthly_button": export_monthly_button,
             "export_all_data_button": export_all_data_button,
+            "download_buttons_container": pn.Row(sizing_mode="stretch_width", margin=(0, 0, 6, 0)),
             "sensitivity_multipliers": sensitivity_multipliers,
             "run_sensitivity_button": run_sensitivity_button,
             "save_sensitivity_button": save_sensitivity_button,
@@ -1301,8 +1326,9 @@ def build_dashboard():
             pn.Row(scenario_state["tank_plot"], scenario_state["tank_eff_plot"], sizing_mode="stretch_width", margin=(0, 0, 6, 0)),
             pn.pane.Markdown("### Step 3: Final Selected Design"),
             pn.Row(final_area, final_tank, sizing_mode="stretch_width", margin=(0, 0, 6, 0)),
-            pn.Row(run_final_button, export_button, html_button, export_all_data_button, sizing_mode="stretch_width", margin=(0, 0, 6, 0)),
+            pn.Row(run_final_button, export_button, html_button, download_button, export_monthly_button, export_all_data_button, sizing_mode="stretch_width", margin=(0, 0, 6, 0)),
             scenario_state["export_status"],
+            scenario_state["download_buttons_container"],
             pn.pane.Markdown("### Step 3 Results"),
             scenario_state["metrics"],
             pn.Row(scenario_state["tank_temp_plot"], sizing_mode="stretch_width", margin=(0, 0, 6, 0)),
@@ -1838,6 +1864,7 @@ def build_dashboard():
         reports_dir = project_reports_dir()
         filename = f"{scenario_key}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         output_path = reports_dir / filename
+        monthly_summary = scenario_monthly_summary(scenario_state["selected_hourly_df"])
         export_case_report(
             output_path=output_path,
             optimized_df=scenario_state["design_grid_df"],
@@ -1852,6 +1879,7 @@ def build_dashboard():
                 "hourly_input_file": display_hourly_input_path(),
                 "report_generated_at": pd.Timestamp.now().isoformat(),
             },
+            monthly_summary_df=monthly_summary,
             input_monthly_df=state["input_monthly_df"],
         )
         scenario_state["export_status"].object = (
@@ -2065,6 +2093,130 @@ def build_dashboard():
         scenario_state["export_status"].object = (
             f"HTML report saved to `{Path('02 reports') / safe_project_folder_name(project_name.value) / filename}`"
         )
+
+    def download_report_to_browser(scenario_key: str) -> None:
+        """Download Excel and HTML reports directly to browser download folder."""
+        scenario_state = state["scenarios"][scenario_key]
+        
+        if scenario_state["selected_summary"] is None or scenario_state["selected_hourly_df"] is None:
+            raise ValueError("Run Step 3 Final Results before downloading reports.")
+        
+        timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
+        reports_dir = project_reports_dir()
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Generate Excel report
+        excel_filename = f"{scenario_key}_{timestamp}.xlsx"
+        excel_path = reports_dir / excel_filename
+        monthly_summary = scenario_monthly_summary(scenario_state["selected_hourly_df"]) if scenario_state["selected_hourly_df"] is not None else None
+        export_case_report(
+            output_path=excel_path,
+            optimized_df=scenario_state["design_grid_df"],
+            step1_df=scenario_state["collector_df"],
+            step2_df=scenario_state["tank_df"],
+            final_summary=scenario_state["selected_summary"],
+            final_hourly_df=scenario_state["selected_hourly_df"],
+            project_inputs={
+                **current_design_inputs(),
+                "scenario_key": scenario_key,
+                "scenario_title": scenario_defs[scenario_key]["tab_title"],
+                "hourly_input_file": display_hourly_input_path(),
+                "report_generated_at": pd.Timestamp.now().isoformat(),
+            },
+            monthly_summary_df=monthly_summary,
+        )
+        
+        # Generate HTML report
+        html_filename = f"{scenario_key}_{timestamp}.html"
+        html_path = reports_dir / html_filename
+        build_static_scenario_report(scenario_key).save(
+            html_path,
+            title=f"{scenario_defs[scenario_key]['tab_title']} Report",
+            resources="inline",
+        )
+        
+        # Create FileDownload widgets using file paths (not bytes)
+        excel_download = pn.widgets.FileDownload(
+            file=excel_path,
+            filename=excel_filename,
+            button_type='success',
+            label='Download Excel',
+            width=140
+        )
+        html_download = pn.widgets.FileDownload(
+            file=html_path,
+            filename=html_filename, 
+            button_type='success',
+            label='Download HTML',
+            width=140
+        )
+        
+        # Clear previous download buttons
+        scenario_state["download_buttons_container"].clear()
+        
+        # Add new download buttons to the container
+        scenario_state["download_buttons_container"].append(excel_download)
+        scenario_state["download_buttons_container"].append(html_download)
+        
+        # Update status message with download buttons
+        scenario_state["export_status"].object = (
+            f"Reports saved to server:<br>"
+            f"- Excel: `{Path('02 reports') / safe_project_folder_name(project_name.value) / excel_filename}`<br>"
+            f"- HTML: `{Path('02 reports') / safe_project_folder_name(project_name.value) / html_filename}`<br>"
+            f"Click the buttons below to download to your local device:"
+        )
+
+    def on_download_click(scenario_key: str) -> None:
+        scenario_state = state["scenarios"][scenario_key]
+        try:
+            download_report_to_browser(scenario_key)
+        except Exception as exc:
+            scenario_state["export_status"].object = f"Download failed: `{exc}`"
+
+    def export_monthly_summary(scenario_key: str) -> None:
+        """Export monthly summary to server and browser."""
+        scenario_state = state["scenarios"][scenario_key]
+        
+        if scenario_state["selected_hourly_df"] is None:
+            raise ValueError("Run Step 3 Final Results before exporting monthly summary.")
+        
+        timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
+        monthly_df = scenario_monthly_summary(scenario_state["selected_hourly_df"])
+        
+        # Save to server
+        reports_dir = project_reports_dir()
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        server_filename = f"{scenario_key}_monthly_summary_{timestamp}.xlsx"
+        server_path = reports_dir / server_filename
+        monthly_df.to_excel(server_path, index=False)
+        
+        # Create FileDownload widget
+        download_widget = pn.widgets.FileDownload(
+            file=server_path,
+            filename=server_filename,
+            button_type='warning',
+            label='Download Monthly Summary'
+        )
+        
+        # Clear previous download buttons
+        scenario_state["download_buttons_container"].clear()
+        
+        # Add download button to the container
+        scenario_state["download_buttons_container"].append(download_widget)
+        
+        # Update status message
+        scenario_state["export_status"].object = (
+            f"Monthly summary saved to:<br>"
+            f"- Server: `{Path('02 reports') / safe_project_folder_name(project_name.value) / server_filename}`<br>"
+            f"Click the download button below to save to your local device:"
+        )
+
+    def on_export_monthly_click(scenario_key: str) -> None:
+        scenario_state = state["scenarios"][scenario_key]
+        try:
+            export_monthly_summary(scenario_key)
+        except Exception as exc:
+            scenario_state["export_status"].object = f"Export monthly summary failed: `{exc}`"
 
     def on_html_click(scenario_key: str) -> None:
         scenario_state = state["scenarios"][scenario_key]
@@ -2350,6 +2502,8 @@ def build_dashboard():
         scenario_state["run_final_button"].on_click(lambda _event, key=scenario_key: update_scenario_final_view(key))
         scenario_state["export_button"].on_click(lambda _event, key=scenario_key: on_export_click(key))
         scenario_state["html_button"].on_click(lambda _event, key=scenario_key: on_html_click(key))
+        scenario_state["download_button"].on_click(lambda _event, key=scenario_key: on_download_click(key))
+        scenario_state["export_monthly_button"].on_click(lambda _event, key=scenario_key: on_export_monthly_click(key))
         scenario_state["export_all_data_button"].on_click(lambda _event, key=scenario_key: on_export_all_data_click(key))
         scenario_state["run_sensitivity_button"].on_click(lambda _event, key=scenario_key: run_scenario_load_sensitivity(key))
         scenario_state["save_sensitivity_button"].on_click(lambda _event, key=scenario_key: on_sensitivity_save_click(key))

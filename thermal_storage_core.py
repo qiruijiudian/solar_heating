@@ -1755,13 +1755,39 @@ def monthly_performance_from_hourly(hourly_df: pd.DataFrame) -> pd.DataFrame:
         "heating_load_kwh": ("heating_load_kwh", "sum"),
         "solar_energy_collected_kwh": ("solar_energy_collected_kwh", "sum"),
         "solar_source_energy_used_kwh": ("solar_source_energy_used_kwh", "sum"),
+        "solar_direct_collector_to_load_kwh": ("solar_direct_collector_to_load_kwh", "sum"),
+        "solar_from_tank_direct_kwh": ("solar_from_tank_direct_kwh", "sum"),
+        "solar_from_tank_via_hp_kwh": ("solar_from_tank_via_hp_kwh", "sum"),
         "auxiliary_heating_delivered_kwh": ("auxiliary_heating_delivered_kwh", "sum"),
         "auxiliary_energy_input_kwh": ("auxiliary_energy_input_kwh", "sum"),
         "tank_charge_kwh": ("tank_charge_kwh", "sum"),
         "tank_discharge_total_kwh": ("tank_discharge_total_kwh", "sum"),
         "tank_loss_kwh": ("tank_loss_kwh", "sum"),
     }
-    return working.groupby("month", as_index=False).agg(**agg_map)
+    monthly_df = working.groupby("month", as_index=False).agg(**agg_map)
+    
+    # Convert kWh to MWh for specified columns
+    kwh_columns = [
+        "heating_load_kwh",
+        "solar_energy_collected_kwh",
+        "solar_source_energy_used_kwh",
+        "solar_direct_collector_to_load_kwh",
+        "solar_from_tank_direct_kwh",
+        "solar_from_tank_via_hp_kwh",
+        "auxiliary_heating_delivered_kwh",
+        "auxiliary_energy_input_kwh",
+        "tank_charge_kwh",
+        "tank_discharge_total_kwh",
+        "tank_loss_kwh",
+    ]
+    
+    for col in kwh_columns:
+        if col in monthly_df.columns:
+            new_col = col.replace("_kwh", "_mwh")
+            monthly_df[new_col] = monthly_df[col] / 1000.0
+            monthly_df.drop(col, axis=1, inplace=True)
+    
+    return monthly_df
 
 
 def daily_performance_from_hourly(hourly_df: pd.DataFrame) -> pd.DataFrame:
