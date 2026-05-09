@@ -35,10 +35,13 @@ def main() -> None:
     parser.add_argument("--heating-supply-temp", type=float, default=45.0)
     parser.add_argument("--heating-delta-t", type=float, default=10.0)
     parser.add_argument("--solar-collector-delta-t", type=float, default=10.0)
+    parser.add_argument("--collector-flow-lph-per-m2", type=float, default=20.0)
+    parser.add_argument("--collector-delta-t-min-c", type=float, default=2.0)
+    parser.add_argument("--collector-delta-t-max-c", type=float, default=15.0)
     parser.add_argument("--direct-solar-delivery-margin", type=float, default=0.0)
     parser.add_argument("--short-term-loss", type=float, default=1.0)
     parser.add_argument("--seasonal-loss", type=float, default=0.15)
-    parser.add_argument("--short-term-tank-height", type=float, default=2.4)
+    parser.add_argument("--short-term-tank-height", type=float, default=6.0)
     parser.add_argument("--seasonal-tank-height", type=float, default=7.5)
     parser.add_argument("--short-term-static-mixing", type=float, default=0.020)
     parser.add_argument("--seasonal-static-mixing", type=float, default=0.010)
@@ -95,6 +98,9 @@ def main() -> None:
         heating_supply_temp=args.heating_supply_temp,
         heating_delta_t=args.heating_delta_t,
         solar_collector_delta_t=args.solar_collector_delta_t,
+        collector_flow_lph_per_m2=args.collector_flow_lph_per_m2,
+        collector_delta_t_min_c=args.collector_delta_t_min_c,
+        collector_delta_t_max_c=args.collector_delta_t_max_c,
         direct_solar_delivery_margin_c=args.direct_solar_delivery_margin,
         short_term_loss_percent_per_day=args.short_term_loss,
         seasonal_loss_percent_per_day=args.seasonal_loss,
@@ -136,6 +142,9 @@ def main() -> None:
             heating_supply_temp=args.heating_supply_temp,
             heating_delta_t=args.heating_delta_t,
             solar_collector_delta_t=args.solar_collector_delta_t,
+            collector_flow_lph_per_m2=args.collector_flow_lph_per_m2,
+            collector_delta_t_min_c=args.collector_delta_t_min_c,
+            collector_delta_t_max_c=args.collector_delta_t_max_c,
             direct_solar_delivery_margin_c=args.direct_solar_delivery_margin,
             short_term_loss_percent_per_day=args.short_term_loss,
             seasonal_loss_percent_per_day=args.seasonal_loss,

@@ -13,6 +13,7 @@
   "seasonal_loss": 0.15,
   "short_term_ratio": 200.0,
   "seasonal_ratio": 3000,
+  "short_term_tank_height_m": 6.0,
   "collector_cost_per_m2": 800,
   "project_lifetime_years": 25,
   "short_term_cost_coeff": 1400.0,
