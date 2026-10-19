@@ -13,12 +13,9 @@
   "seasonal_loss": 0.15,
   "short_term_ratio": 200.0,
   "seasonal_ratio": 3000,
+  "short_term_tank_height_m": 6.0,
   "collector_cost_per_m2": 800,
   "project_lifetime_years": 25,
-  "short_term_cost_coeff": 1400.0,
-  "short_term_cost_exponent": 0.78,
-  "seasonal_cost_coeff": 900.0,
-  "seasonal_cost_exponent": 0.82,
   "short_sizing_mode": "Auto Generate",
   "short_collector_min_size": 50.0,
   "short_collector_max_size": 50000,
@@ -36,5 +33,13 @@
   "collector_type": "Evacuated Tube",
   "eta0": 0.65,
   "a1": 1.5,
-  "a2": 0.005
+  "a2": 0.005,
+  "short_term_cost_asymptote": 585.8,
+  "short_term_cost_scale": 18470.0,
+  "short_term_cost_power": -0.576,
+  "seasonal_cost_asymptote": 196.3,
+  "seasonal_cost_scale": 1313000.0,
+  "seasonal_cost_power": -0.935,
+  "short_term_cost_correction_factor": 1.0,
+  "seasonal_cost_correction_factor": 1.1
 }

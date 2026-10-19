@@ -22,3 +22,7 @@ venv/
 .mypy_cache/
 .coverage
 htmlcov/
+
+# Server logs
+gui_server.log
+*.log
