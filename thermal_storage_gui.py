@@ -324,8 +324,15 @@ def save_design_inputs_to_excel(path: Path, values: dict[str, object]) -> None:
     pd.DataFrame([values]).to_excel(path, index=False)
 
 
+def application_root() -> Path:
+    """Data directory anchor: the exe folder when packaged, else the source folder."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
 def report_file_url(file_path: Path) -> str:
-    reports_root = Path(__file__).resolve().parent / "02 reports"
+    reports_root = application_root() / "02 reports"
     rel = file_path.resolve().relative_to(reports_root)
     return "/reports/" + "/".join(quote(part) for part in rel.parts)
 
@@ -484,12 +491,12 @@ def safe_project_folder_name(value: str) -> str:
 
 
 def build_dashboard():
-    input_dir = Path(__file__).resolve().parent / "01 input files"
+    input_dir = application_root() / "01 input files"
     input_dir.mkdir(exist_ok=True)
     hourly_input_path = input_dir / "weather and heating load data.xlsx"
-    design_inputs_path = Path(__file__).resolve().parent / "design_inputs.xlsx"
+    design_inputs_path = application_root() / "design_inputs.xlsx"
     default_inputs = {
-        "project_name": Path(__file__).resolve().parent.name,
+        "project_name": application_root().name,
         "tank_max_temp": 80.0,
         "small_delta_t_tank_min_temp": 35.0,
         "large_delta_t_tank_min_temp": 8.0,
@@ -844,16 +851,16 @@ def build_dashboard():
             return hourly_input_path
         chosen_path = Path(raw_path).expanduser()
         if not chosen_path.is_absolute():
-            chosen_path = Path(__file__).resolve().parent / chosen_path
+            chosen_path = application_root() / chosen_path
         return chosen_path
 
     def project_reports_dir() -> Path:
-        return Path(__file__).resolve().parent / "02 reports" / safe_project_folder_name(project_name.value)
+        return application_root() / "02 reports" / safe_project_folder_name(project_name.value)
 
     def display_hourly_input_path(path: Path | None = None) -> str:
         chosen_path = selected_hourly_input_path() if path is None else path
         try:
-            chosen_path = chosen_path.relative_to(Path(__file__).resolve().parent)
+            chosen_path = chosen_path.relative_to(application_root())
         except ValueError:
             pass
         return str(chosen_path)
@@ -2467,7 +2474,7 @@ def build_dashboard():
 
 
 def main() -> None:
-    reports_root = Path(__file__).resolve().parent / "02 reports"
+    reports_root = application_root() / "02 reports"
     reports_root.mkdir(exist_ok=True)
     pn.serve(
         build_dashboard(),

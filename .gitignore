@@ -26,3 +26,9 @@ htmlcov/
 # Server logs
 gui_server.log
 *.log
+
+# Packaging outputs
+build/
+dist/
+installer/
+*.spec
